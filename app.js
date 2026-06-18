@@ -99,7 +99,7 @@ async function callAI(prompt, sysMsg = '', retries = 2) {
       return `❌ AI Error: timeout after ${AI.timeout/1000}s`;
     }
     // Retry 5xx / network errors with exponential backoff
-    if (retries > 0 && !e.message.includes('(permanent') && !e.message.match(/AI [45]0[0-9]:/)) {
+    if (retries > 0 && !e.message.includes('(permanent') && !e.message.match(/AI 4[0-9][0-9]:/)) {
       const delay = Math.pow(2, 3 - retries) * 1000; // 1s, 2s, 4s
       logError('ai', `AI error, retry in ${delay}ms (${retries} left): ${e.message.slice(0, 120)}`);
       await new Promise(resolve => setTimeout(resolve, delay));
@@ -243,53 +243,104 @@ Untuk pertanyaan atau perintah lain, jawab seperti biasa.`;
 
     await patchMsg(intToken, '🧠 **Menganalisa...**');
 
-    // Classify intent: is this a Discord action or a general query?
-    const classifyPrompt = `Classify this user request: "${prompt}"
-    
-Respond with exactly one word:
-- ACTION if user clearly wants to create/delete/rename/edit a Discord channel
-- QUERY for anything else (questions, cron jobs, analysis, reports, etc.)`;
+    // ── Step 1: Regex-based intent & action detection ──
+    const lower = prompt.toLowerCase();
+    let actionCmd = null;
+    let actionResult = null;
 
-    const intent = await callAI(classifyPrompt, 'You are a classifier. Respond with one word: ACTION or QUERY.');
-    const isAction = intent.trim().toUpperCase() === 'ACTION';
+    // 1a. Rename channel: "ubah nama X jadi Y" / "rename X ke Y" / "ganti nama X menjadi Y"
+    const renameMatch = lower.match(/(?:ubah|rename|ganti)\s+(?:nama\s+)?(?:channel\s+)?#?(\S[^jadi]+?)\s*(?:jadi|ke|menjadi|to)\s+(.+)/i);
+    if (renameMatch) {
+      actionCmd = 'RENAME';
+      const chName = renameMatch[1].trim();
+      const newName = renameMatch[2].trim();
+      await patchMsg(intToken, '🔧 **Merename channel...**');
+      const r = await tool('rename_channel', { guild_id, name_or_id: chName, new_name: newName });
+      const d = typeof r === 'object' ? r : {};
+      if (d.id) actionResult = `✅ Channel \`#${chName}\` di-rename ke \`#${d.name}\`.`;
+      else actionResult = '❌ Gagal rename: ' + (d.error || 'channel tidak ditemukan');
+    }
 
-    if (isAction) {
-      // Execute as Discord action via MCP + regex
-      let answer = await callAI(prompt, `Execute Discord commands. Available: create_channel(name), delete_channel(name_or_id), rename_channel(name_or_id, new_name), set_topic(name_or_id, topic), send_message(name_or_id, content), list_channels(), get_channel(name_or_id). Guild: ${guild_id}
-
-ONLY execute if the user EXPLICITLY asks to create/delete/rename/edit a Discord channel.
-If unclear, respond with "TIDAK JELAS" and explain why.`);
-
-      if (answer.startsWith('❌') || answer === 'TIDAK JELAS') {
-        answer = await callAI(prompt, `Execute Discord commands. Same tools.
-
-Rules:
-- "buat/bikin channel X" → create_channel
-- "hapus/delete channel X" → delete_channel  
-- "rename X jadi Y" → rename_channel
-- Any tool use MUST match the user's exact intent
-
-Respond with the RESULT of the action, or explain what you did.`);
+    // 1b. Create channel: "buat channel X" / "create channel X"
+    if (!actionCmd) {
+      const cm = lower.match(/(?:buatkan|buat|create|bikin|bangun)\s+(?:channel|saluran)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))/i);
+      if (cm) {
+        actionCmd = 'CREATE';
+        const raw = (cm[1] || cm[2] || '').trim();
+        await patchMsg(intToken, '🔧 **Membuat channel...**');
+        const ch = await tool('create_channel', { guild_id, name: raw });
+        if (ch.id) actionResult = '✅ Channel <#' + ch.id + '> dibuat.';
+        else actionResult = '❌ Gagal: ' + (ch.error || 'unknown');
       }
+    }
 
-      // Regex fallback for clear channel operations
-      if (!answer || answer.includes('TIDAK JELAS') || answer.includes("can't") || answer.includes('tidak dapat')) {
-        const lower = prompt.toLowerCase();
-        const cm = lower.match(/(?:buatkan|buat|create|bikin|bangun)\s+(?:channel|saluran)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))/i);
-        if (cm) {
-          const raw = (cm[1] || cm[2] || '').trim();
-          const ch = await tool('create_channel', { guild_id, name: raw });
-          answer = ch.id ? '✅ Channel <#' + ch.id + '> dibuat.' : '❌ Gagal: ' + (ch.error || 'unknown');
-        }
+    // 1c. Delete channel: "hapus channel X" / "delete channel X"
+    if (!actionCmd) {
+      const dm = lower.match(/(?:hapus|delete|remove)\s+(?:channel\s+)?#?(\S[^jadi]+?)(?:\s*$|$)/i);
+      if (dm) {
+        actionCmd = 'DELETE';
+        const raw = dm[1].trim().replace(/["']/g, '');
+        await patchMsg(intToken, '🔧 **Menghapus channel...**');
+        const r = await tool('delete_channel', { guild_id, name_or_id: raw });
+        const d = typeof r === 'object' ? r : {};
+        if (d.success) actionResult = '✅ Channel dihapus.';
+        else actionResult = '❌ Gagal: ' + (d.error || 'channel tidak ditemukan');
       }
+    }
 
-      if (!answer) answer = '✅ Selesai.';
-      await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: '**Prompt:** ' + prompt + '\n\n' + answer.slice(0, 1900) });
-      await patchMsg(intToken, '✅ **Selesai.**\nResponse di <#' + AI_RESPONSE_CHANNEL + '>.');
-    } else {
-      // General query → Hermes handles it (just acknowledge, the real processing is here)
-      await patchMsg(intToken, '📨 **Permintaan diterima.**\nHermes Agent sedang memproses...\nResponse akan muncul di <#' + AI_RESPONSE_CHANNEL + '>.');
+    // 1d. Send message: "kirim pesan ke #X: isi"
+    if (!actionCmd) {
+      const sm = lower.match(/(?:kirim|send)\s+(?:pesan\s+)?(?:ke\s+)?#?(\S+?)\s*[:\-]\s*(.+)/i);
+      if (sm) {
+        actionCmd = 'SEND';
+        const target = sm[1].trim();
+        const msg = sm[2].trim();
+        await patchMsg(intToken, '🔧 **Mengirim pesan...**');
+        const r = await tool('send_message', { guild_id, name_or_id: target, content: msg });
+        const d = typeof r === 'object' ? r : {};
+        actionResult = d.success ? '✅ Pesan terkirim.' : '❌ Gagal: ' + (d.error || 'channel tidak ditemukan');
+      }
+    }
+
+    // 1e. Request about monitoring / cron / analysis → QUERY
+    const queryPatterns = /^(harga|promo|analisa|monitoring|cron|coba|test|apa|kapan|siapa|berapa|aktivitas|sejarah|riwayat)/i;
+    const isQuery = !actionCmd && (
+      queryPatterns.test(lower.trim()) ||
+      prompt.length < 15 ||
+      /\?/.test(prompt) ||
+      /promo|kebutuhan|emas|dollar|cron|jadwal/i.test(lower)
+    );
+
+    // ── Step 2: Execute or forward ──
+    if (actionCmd) {
+      // Action done directly above → report result
+      const finalText = actionResult || '✅ Selesai.';
+      await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: '**Prompt:** ' + prompt + '\n\n' + finalText });
+      await patchMsg(intToken, '✅ **Selesai.**\n' + finalText);
+    } else if (isQuery) {
+      // Query → forward to Hermes
+      await patchMsg(intToken, '📨 **Permintaan diterima.**\nResponse akan muncul di <#' + AI_RESPONSE_CHANNEL + '>.');
       await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: '**Prompt dari <@' + (member?.user?.id || '') + '>:**\n' + prompt });
+    } else {
+      // Unknown → use AI
+      const aiAnswer = await callAI(prompt, `Kamu asisten Discord. Anda punya akses MCP tools: create_channel, delete_channel, rename_channel, send_message, set_topic.
+
+Jika user meminta action Discord (buat/hapus/rename channel atau kirim pesan), balas dengan:
+ACTION:CMD|...args...
+CONTOH: "buat channel test" → "create_channel"
+"rename X jadi Y" → "rename_channel"
+"hapus X" → "delete_channel"
+"kirim ke X: isi" → "send_message"
+
+Jika pertanyaan biasa, jawab seperti asisten AI normal. Balas dalam Bahasa Indonesia.`);
+
+      const fallbackResult = aiAnswer?.startsWith('ACTION:') ? null : aiAnswer;
+      if (fallbackResult) {
+        await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: '**Prompt:** ' + prompt + '\n\n' + fallbackResult });
+        await patchMsg(intToken, '✅ **Selesai.**\nResponse di <#' + AI_RESPONSE_CHANNEL + '>.');
+      } else {
+        await patchMsg(intToken, '✅ **Selesai.** (tidak ada action yang dikenali)');
+      }
     }
     return;
   }
