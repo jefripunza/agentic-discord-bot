@@ -46,6 +46,11 @@ function logError(ctx, err) {
   console.error(`[ERR] ${ctx}: ${(err?.message || err).slice(0, 200)}`);
 }
 
+function safeParse(text) {
+  try { return text.includes('{') ? JSON.parse(text) : null; }
+  catch { return null; }
+}
+
 // ─── AI (via 9ROUTER) ───
 function loadAI() {
   // Prefer AI_API_KEY from env; fallback to hex-encoded key (backward compat)
@@ -83,7 +88,7 @@ async function callAI(prompt, sysMsg = '', retries = 2) {
     clearTimeout(timer);
     const text = await r.text();
     if (!r.ok) {
-      const detail = text.includes('{') ? (JSON.parse(text).error?.message || text) : text;
+      const detail = safeParse(text)?.error?.message || text || '(empty response)';
       // Skip retry on 4xx (auth/quota — permanent), retry on 5xx (transient)
       if (r.status >= 400 && r.status < 500 && retries > 0) {
         logError('ai', `AI ${r.status} (permanent, not retrying): ${detail.slice(0, 200)}`);
@@ -91,7 +96,7 @@ async function callAI(prompt, sysMsg = '', retries = 2) {
       }
       throw new Error(`AI ${r.status}: ${detail.slice(0, 200)}`);
     }
-    return JSON.parse(text).choices?.[0]?.message?.content?.trim() || '';
+    return safeParse(text)?.choices?.[0]?.message?.content?.trim() || '';
   } catch (e) {
     clearTimeout(timer);
     if (e.name === 'AbortError') {
