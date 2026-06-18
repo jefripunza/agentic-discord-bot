@@ -159,39 +159,60 @@ async def fetch_news():
     """Fetch news headlines from multiple sources."""
     news = []
     async with httpx.AsyncClient(timeout=10) as c:
-        # Source 1: CNBC Indonesia RSS (most reliable)
+        # Source 1: Google News RSS (most reliable)
         try:
-            r = await c.get("https://www.cnbcindonesia.com/market/feed",
+            r = await c.get("https://news.google.com/rss/search?q=ekonomi+indonesia&hl=id&gl=ID&ceid=ID:id",
                           headers=HTTP_HEADERS)
             if r.status_code == 200:
                 soup = BeautifulSoup(r.text, "xml")
-                for item in soup.find_all("item")[:5]:
+                for item in soup.find_all("item")[:6]:
                     title = item.find("title")
                     if title:
-                        news.append(title.get_text(strip=True))
+                        t = title.get_text(strip=True)
+                        # Remove source suffix like " - CNBC Indonesia"
+                        t = re.sub(r'\s*-\s*\S+$', '', t)
+                        if t and len(t) > 10:
+                            news.append(t)
         except: pass
 
-        # Source 2: Antara News RSS
-        if not news:
+        # Source 2: Detik RSS
+        if len(news) < 3:
             try:
-                r = await c.get("https://www.antaranews.com/rss/terkini/ekonomi",
+                r = await c.get("https://rss.detik.com/index.php/ekonomi",
                               headers=HTTP_HEADERS)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, "xml")
                     for item in soup.find_all("item")[:5]:
                         title = item.find("title")
                         if title:
-                            news.append(title.get_text(strip=True))
+                            t = title.get_text(strip=True)
+                            if t and len(t) > 10 and not any(s in t.lower() for s in ['login','iklan']):
+                                news.append(t)
             except: pass
 
-        # Source 3: simple scrape
-        if not news:
+        # Source 3: Antara RSS
+        if len(news) < 3:
+            try:
+                r = await c.get("https://www.antaranews.com/rss/terkini",
+                              headers=HTTP_HEADERS)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, "xml")
+                    for item in soup.find_all("item")[:5]:
+                        title = item.find("title")
+                        if title:
+                            t = title.get_text(strip=True)
+                            if t and len(t) > 10:
+                                news.append(t.split(" - ")[0])
+            except: pass
+
+        # Source 4: CNBC scrape
+        if len(news) < 3:
             try:
                 r = await c.get("https://www.cnbcindonesia.com/market",
                               headers=HTTP_HEADERS)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, "lxml")
-                    for el in soup.select("article h2 a, h3 a, .title, .media-title")[:5]:
+                    for el in soup.select("article h2 a, .media-title a, a.title")[:5]:
                         txt = el.get_text(strip=True)
                         if txt and len(txt) > 10:
                             news.append(txt)
@@ -199,7 +220,7 @@ async def fetch_news():
 
     if not news:
         news = ["Belum ada berita terbaru saat ini"]
-    return news
+    return news[:8]
 
 # ── Format message ──
 def format_report(gold, rates, promos, news, hour):
@@ -211,18 +232,25 @@ def format_report(gold, rates, promos, news, hour):
     gold_jual = f"Rp {gold['jual']:,}" if gold['jual'] else "N/A"
     gold_beli = f"Rp {gold['beli']:,}" if gold['beli'] else "N/A"
 
-    # Format rates
-    usd_idr = f"Rp {(rates.get('usd') or 0):,}" if rates.get('usd') else "N/A"
-    cny_idr = f"Rp {int(rates.get('cny_idr') or 0):,}" if rates.get('cny_idr') else "N/A"
-    rub_idr = f"Rp {int((rates.get('rub') or 0) * (rates.get('usd') or 0)):,}" if rates.get('rub') and rates.get('usd') else "N/A"
+    # Format rates — per 1 unit to IDR
+    usd = rates.get('usd') or 0
+    cny = rates.get('cny') or 0
+    rub = rates.get('rub') or 0
+
+    usd_idr = f"1 USD = Rp {usd:,}" if usd else "USD: N/A"
+    cny_idr = f"1 CNY = Rp {int(usd / cny):,}" if usd and cny else "CNY: N/A"
+    rub_idr = f"1 RUB = Rp {int(usd / rub):,}" if usd and rub else "RUB: N/A"
     
-    # BRICS index (simplified)
-    brics = f"{(rates.get('cny') or 0):.2f} CNY / {(rates.get('rub') or 0):.2f} RUB / USD"
+    # BRICS — individual currencies
+    brics_lines = []
+    if usd and cny: brics_lines.append(f"CNY: Rp {int(usd / cny):,}")
+    if usd and rub: brics_lines.append(f"RUB: Rp {int(usd / rub):,}")
+    brics = " | ".join(brics_lines) if brics_lines else "BRICS: N/A"
 
     # Analysis for 7am
     analysis = ""
     if hour == 7:
-        spread = (gold['jual'] - gold['beli']) / gold['beli'] * 100 if gold['beli'] and gold['jual'] else 0
+        spread = (gold.get('jual', 0) - gold.get('beli', 0)) / gold.get('beli', 1) * 100 if gold.get('beli') else 0
         analysis = f"""**📊 REKOMENDASI**
 
 Berdasarkan spread harga ({spread:.1f}%) dan sentimen pasar:
@@ -240,20 +268,20 @@ Berdasarkan spread harga ({spread:.1f}%) dan sentimen pasar:
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 
 **🥇 HARGA EMAS (Logam Mulia)**
-Harga Jual: {gold_jual}
-Harga Beli: {gold_beli}
+• Harga Jual: Rp {gold['jual']:,}
+• Harga Beli: Rp {gold['beli']:,}
 
-**💱 NILAI TUKAR**
-USD/IDR: {usd_idr}
-CNY/IDR: {cny_idr}
-RUB/IDR: {rub_idr}
-BRICS: {brics}
+**💱 NILAI TUKAR (per 1 unit → IDR)**
+{usd_idr}
+{cny_idr}
+{rub_idr}
+• BRICS: {brics}
 
-**🤖 PROMO AI**
-• {' • '.join(promos)}
+**🤖 STATUS PROVIDER AI**
+{chr(10).join('• ' + p for p in promos)}
 
 **📰 BERITA & SENTIMEN**
-• {' • '.join(news[:5])}
+{chr(10).join('• ' + n for n in (news[:5] or ['Belum tersedia']))}
 
 {analysis}━━━━━━━━━━━━━━━━━━━━━━━━━
 _Data diperbaharui: {time_str}_"""
