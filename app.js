@@ -165,20 +165,21 @@ async function processAIPrompt(prompt, sysPrompt, guildId, channelId, intToken) 
   // Fallback 1: regex-based for common patterns
   let finalAction = action;
   if (!finalAction) {
-    const chMatch = lower.match(/(?:buat|create|bikin)\s*(?:channel|saluran)?\s*"?([a-z0-9\s-]+)"?\s*$/i);
+    const chMatch = lower.match(/(?:buatkan|buat|create|bikin|bangun)\s+(?:channel|saluran)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))$/i);
     if (chMatch) {
-      const name = chMatch[1].trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/^-|-$/g, '');
+      const raw = (chMatch[1] || chMatch[2] || '').trim();
+      const name = raw.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
       if (name.length >= 2) {
         finalAction = `CREATE|${name}`;
       }
     }
-    const delMatch = lower.match(/(?:hapus|delete|remove)\s*(?:channel)?\s*"?([a-z0-9\s-]+)"?\s*$/i);
-    if (delMatch && !finalAction) {
-      finalAction = 'NONE';
+    if (!finalAction) {
+      const delMatch = lower.match(/(?:hapus|delete|remove)\s+(?:channel)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))$/i);
+      if (delMatch) {
+        finalAction = 'NONE';
+      }
     }
   }
-
-  // Step 2: Executing
   const cmdLabel = finalAction ? finalAction.split('|')[0] : '';
   const execMsg = finalAction ? `🔧 **${cmdLabel === 'CREATE' ? 'Membuat channel...' : 'Mengeksekusi...'}**` : '✅ Selesai.';
   await patchFollowup(intToken, `🧠 **${cmdLabel === 'CREATE' ? 'Membuat channel...' : 'Memproses...'}**`);
