@@ -200,29 +200,30 @@ async function processAIPrompt(prompt, sysPrompt, guildId, channelId, intToken) 
 
 // ─── Try to parse action from AI response ───
 function parseAction(text) {
-  const lines = text.split('\n').map(l => l.trim());
   let action = null;
-  const filtered = [];
+  let cleaned = text;
 
-  for (const line of lines) {
-    if (line.startsWith('ACTION:')) {
-      action = line.replace('ACTION:', '').trim();
-    } else if (line.startsWith('- ACTION:')) {
-      action = line.replace('- ACTION:', '').trim();
-    } else {
-      // Skip empty/irrelevant lines that look like raw instructions
-      if (line && !line.match(/^(ACTION|CMD|FORMAT|Contoh|Gunakan|RESPOND|Example|Use the)/i)) {
-        filtered.push(line);
-      }
-    }
+  // Try to find ACTION: anywhere (inline or newline)
+  const actionMatch = cleaned.match(/\bACTION\s*:\s*(.+?)(?:\n|$)/);
+  if (actionMatch) {
+    action = actionMatch[1].trim();
+    // Remove the ACTION: line from text
+    cleaned = cleaned.replace(actionMatch[0], '').trim();
+    // Also clean any leading punctuation left behind
+    cleaned = cleaned.replace(/^[.\s-—–]+/, '').trim();
   }
 
-  // Normalize action: CREATE_CHANNEL -> CREATE, DELETE_CHANNEL -> DELETE, etc.
+  // Normalize action: CREATE_CHANNEL -> CREATE, etc.
+  // Also normalize | separator to :
   if (action) {
-    action = action.replace(/_CHANNEL$/, '').replace(/_MESSAGE$/, 'MSG');
+    action = action
+      .replace(/_CHANNEL\b/gi, '')
+      .replace(/_CHANNEL$/gi, '')  // also if at end
+      .replace(/_MESSAGE\b/gi, 'MSG')
+      .replace(/\|/g, ':');  // AI uses | instead of :
   }
 
-  return { action, text: filtered.join('\n').trim() };
+  return { action, text: cleaned };
 }
 
 // ─── Interactions endpoint ───
