@@ -51,7 +51,9 @@ function loadAI() {
   // Prefer AI_API_KEY from env; fallback to hex-encoded key (backward compat)
   const keyHex = '736b2d626533663633653930396265656666312d6a35376b656f2d6537623432636532';
   const fallbackKey = Buffer.from(keyHex, 'hex').toString();
-  const key = process.env.AI_API_KEY || process.env['9ROUTER_API_KEY'] || fallbackKey;
+  // Sanity: env key must look valid (starts with sk-, >= 20 chars) or fall back
+  const envKey = process.env.AI_API_KEY || process.env['9ROUTER_API_KEY'] || '';
+  const key = (envKey.startsWith('sk-') && envKey.length >= 20) ? envKey : fallbackKey;
   return {
     apiKey: key,
     baseUrl: (process.env.AI_BASE_URL || 'https://ai.jefripunza.com/v1').replace(/\/+$/, ''),
