@@ -49,6 +49,7 @@ async function callAI(prompt, systemMsg) {
     ],
     max_tokens: 1024,
     temperature: 0.7,
+    stream: false,
   };
   try {
     const resp = await fetch(AI.baseUrl + '/chat/completions', {
@@ -69,7 +70,12 @@ async function callAI(prompt, systemMsg) {
       logError('AI_parse', e);
       throw new Error('AI response parse failed: ' + text.slice(0, 200));
     }
-    return data.choices?.[0]?.message?.content?.trim() || 'Tidak ada respons AI.';
+    let content = data.choices?.[0]?.message?.content?.trim();
+    // Handle case where reasoning consumed all tokens but no visible content
+    if (!content && data.choices?.[0]?.finish_reason === 'length') {
+      content = '[AI response was cut off - try a more specific request]';
+    }
+    return content || 'Tidak ada respons AI.';
   } catch (e) {
     logError('AI_call', e);
     return `❌ AI Error: ${e.message.slice(0, 250)}`;
