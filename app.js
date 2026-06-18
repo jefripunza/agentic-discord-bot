@@ -62,7 +62,14 @@ async function callAI(prompt, systemMsg) {
     });
     const text = await resp.text();
     if (!resp.ok) {
-      const err = text.includes('{') ? JSON.parse(text).error?.message || text : text;
+      let err;
+      if (!text || !text.trim()) {
+        err = `AI service returned ${resp.status} with empty body`;
+      } else if (text.includes('{')) {
+        try { err = JSON.parse(text).error?.message || text; } catch (_) { err = text; }
+      } else {
+        err = text;
+      }
       throw new Error(`AI ${resp.status}: ${err.slice(0, 200)}`);
     }
     let data;
