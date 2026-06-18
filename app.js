@@ -141,11 +141,14 @@ async function patchFollowup(intToken, content, retries = 3) {
   return false;
 }
 
-// ─── Process AI prompt with error handling + retry ───
-async function processAIPrompt(prompt, sysPrompt, guildId, channelId) {
+// ─── Process AI prompt with interim thinking + retry ───
+async function processAIPrompt(prompt, sysPrompt, guildId, channelId, intToken) {
+  // Step 1: Analyzing
+  await patchFollowup(intToken, '🧠 **Menganalisa permintaan...**');
+
   let aiText = await callAI(prompt, sysPrompt);
 
-  // If AI error, retry once
+  // Retry once on error
   if (aiText.startsWith('❌ AI Error:')) {
     aiText = await callAI(prompt, sysPrompt);
   }
@@ -154,20 +157,64 @@ async function processAIPrompt(prompt, sysPrompt, guildId, channelId) {
     return { error: true, text: aiText.replace('❌ AI Error: ', '') };
   }
 
+  // Parse action from AI
   const { action, text } = parseAction(aiText);
-  const result = action ? await executeAction(action, guildId, channelId) : null;
-  return { error: false, text, action, result };
+
+  const lower = prompt.toLowerCase();
+
+  // Fallback 1: regex-based for common patterns
+  let finalAction = action;
+  if (!finalAction) {
+    const chMatch = lower.match(/(?:buat|create|bikin)\s*(?:channel|saluran)?\s*"?([a-z0-9\s-]+)"?\s*$/i);
+    if (chMatch) {
+      const name = chMatch[1].trim().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').replace(/^-|-$/g, '');
+      if (name.length >= 2) {
+        finalAction = `CREATE|${name}`;
+      }
+    }
+    const delMatch = lower.match(/(?:hapus|delete|remove)\s*(?:channel)?\s*"?([a-z0-9\s-]+)"?\s*$/i);
+    if (delMatch && !finalAction) {
+      finalAction = 'NONE';
+    }
+  }
+
+  // Step 2: Executing
+  const cmdLabel = finalAction ? finalAction.split('|')[0] : '';
+  const execMsg = finalAction ? `🔧 **${cmdLabel === 'CREATE' ? 'Membuat channel...' : 'Mengeksekusi...'}**` : '✅ Selesai.';
+  await patchFollowup(intToken, `🧠 **${cmdLabel === 'CREATE' ? 'Membuat channel...' : 'Memproses...'}**`);
+
+  const result = finalAction ? await executeAction(finalAction, guildId, channelId) : null;
+
+  // Step 3: Result
+  const finalText = result || text || (finalAction ? '✅ Selesai.' : text || '✅ Selesai.');
+  return { error: false, text: finalText };
 }
+
+// ─── Try to parse action from AI response ───
 function parseAction(text) {
   const lines = text.split('\n').map(l => l.trim());
-  // Look for ACTION: line
-  const actionLine = lines.find(l => l.startsWith('ACTION:'));
-  if (actionLine) {
-    const action = actionLine.replace('ACTION:', '').trim();
-    const rest = lines.filter(l => !l.startsWith('ACTION:')).join(' ').trim();
-    return { action, text: rest };
+  let action = null;
+  const filtered = [];
+
+  for (const line of lines) {
+    if (line.startsWith('ACTION:')) {
+      action = line.replace('ACTION:', '').trim();
+    } else if (line.startsWith('- ACTION:')) {
+      action = line.replace('- ACTION:', '').trim();
+    } else {
+      // Skip empty/irrelevant lines that look like raw instructions
+      if (line && !line.match(/^(ACTION|CMD|FORMAT|Contoh|Gunakan|RESPOND|Example|Use the)/i)) {
+        filtered.push(line);
+      }
+    }
   }
-  return { action: null, text };
+
+  // Normalize action: CREATE_CHANNEL -> CREATE, DELETE_CHANNEL -> DELETE, etc.
+  if (action) {
+    action = action.replace(/_CHANNEL$/, '').replace(/_MESSAGE$/, 'MSG');
+  }
+
+  return { action, text: filtered.join('\n').trim() };
 }
 
 // ─── Interactions endpoint ───
@@ -207,29 +254,23 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (re
 
       res.send({ type: 5 }); // Defer
 
-      // Langsung kirim "processing" message
-      await patchFollowup(intToken, '🧠 **Sedang memproses instruksi...**');
-
-      const sysPrompt = `Extract a Discord action from user request. RESPOND ONLY WITH:
-ACTION: CMD|channel_id|arg1|arg2
-CMDs: DELETE, RENAME|new_name, TOPIC|text, CREATE|channel_name, MSG|channel_id|text, NONE
-Example: "hapus channel" -> ACTION: DELETE|channel_id
-Example: "rename jadi lobby" -> ACTION: RENAME|channel_id|lobby
-Use the exact channel_id: ${chId}. If unsure, use ACTION: NONE`;
+      // processAIPrompt handles interim thinking messages
+      const sysPrompt = `Extract a Discord action. RESPOND EXACTLY:
+ACTION: CMD|channel_id|args
+CMD: DELETE | RENAME|new_name | TOPIC|text | NONE
+Channel: ${chId}
+Instruction: ${instruksi}`;
 
       const result = await processAIPrompt(
-        `User instruction on channel ${chId}: ${instruksi}`,
-        sysPrompt, guild_id, chId
+        `Instruction on channel ${chId}: ${instruksi}`,
+        sysPrompt, guild_id, chId, intToken
       );
 
-      let content;
       if (result.error) {
-        content = `❌ **Gagal memproses instruksi**\n> \`${result.text.slice(0, 150)}\`\n🧠 **Self-fixing agent** sudah diberitahu untuk perbaiki masalah ini. Coba lagi dalam beberapa menit.`;
-        await patchFollowup(intToken, content);
+        await patchFollowup(intToken, `❌ **Gagal memproses instruksi**\n> \`${result.text.slice(0, 150)}\`\n🧠 Self-fixing agent sudah diberitahu.`);
         logError('edit_fail', result.text);
       } else {
-        content = result.result || result.text || `✅ Instruksi diterima.`;
-        await patchFollowup(intToken, content);
+        await patchFollowup(intToken, result.text || '✅ Instruksi diterima.');
       }
       return;
     }
@@ -241,24 +282,18 @@ Use the exact channel_id: ${chId}. If unsure, use ACTION: NONE`;
 
       res.send({ type: 5 }); // Defer
 
-      await patchFollowup(intToken, '🧠 **Sedang memproses prompt...**');
+      // processAIPrompt handles interim thinking messages
+      const sysPrompt = `You are a Discord bot. For user request:
+- If it asks to do something in Discord, respond with ACTION: CMD|args
+- CMDs: CREATE|channel_name, DELETE|channel_id, RENAME|channel_id|new_name, MSG|channel_id|text, TOPIC|channel_id|text, NONE
+- If no action needed, respond with your answer and ACTION: NONE`;
+      const result = await processAIPrompt(prompt, sysPrompt, guild_id, channel_id, intToken);
 
-      const sysPrompt = `Kamu adalah Hermes Discord Bot. Jawab user dengan informatif.
-Gunakan format ACTION:CMD|args jika perlu eksekusi. ACTION: NONE untuk no action.`;
-
-      const result = await processAIPrompt(
-        `[CHANNEL=${channel_id}] ${prompt}`,
-        sysPrompt, guild_id, channel_id
-      );
-
-      let content;
       if (result.error) {
-        content = `❌ **Gagal memproses prompt**\n> \`${result.text.slice(0, 150)}\`\n🧠 **Self-fixing agent** sudah diberitahu. Coba lagi dalam beberapa menit.`;
-        await patchFollowup(intToken, content);
+        await patchFollowup(intToken, `❌ **Gagal memproses**\n> \`${result.text.slice(0, 150)}\`\n🧠 Self-fixing agent akan handle. Coba lagi nanti.`);
         logError('prompt_fail', result.text);
       } else {
-        content = (result.result ? result.result + '\n' : '') + (result.text || '');
-        await patchFollowup(intToken, content || '✅ Selesai.');
+        await patchFollowup(intToken, result.text || '✅ Selesai.');
       }
       return;
     }
