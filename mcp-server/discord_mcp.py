@@ -145,6 +145,58 @@ async def get_channel(guild_id: str, name_or_id: str) -> str:
             return json.dumps(r.json())
         return json.dumps({"error": r.text})
 
+@mcp.tool()
+async def send_components(guild_id: str, name_or_id: str, content: str, buttons: list) -> str:
+    """Send a message with interactive buttons.
+    buttons format: [{"label":"Jual","custom_id":"jual_emas","style":4},{"label":"Beli","custom_id":"beli_emas","style":3}]
+    style: 1=gray, 2=blue, 3=green, 4=red
+    Returns message JSON with id for editing."""
+    target = await _resolve(guild_id, name_or_id)
+    if not target:
+        return json.dumps({"error": "Channel not found"})
+    components = []
+    row = {"type": 1, "components": []}
+    for b in buttons:
+        row["components"].append({
+            "type": 2,
+            "label": b.get("label", "Button"),
+            "style": b.get("style", 1),
+            "custom_id": b.get("custom_id", "btn_" + b.get("label", "")),
+            "disabled": b.get("disabled", False)
+        })
+    components.append(row)
+    async with httpx.AsyncClient() as c:
+        r = await c.post(f"{API}/channels/{target}/messages", headers=HEADERS,
+                         json={"content": content[:1900], "components": components})
+        if r.status_code == 200:
+            return json.dumps(r.json())
+        return json.dumps({"error": r.text})
+
+@mcp.tool()
+async def disable_buttons(guild_id: str, channel_id: str, message_id: str) -> str:
+    """Disable all buttons on a message. Use after a button is clicked to prevent double-submission."""
+    # Get current message
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{API}/channels/{channel_id}/messages/{message_id}", headers=HEADERS)
+        if r.status_code != 200:
+            return json.dumps({"error": "Message not found"})
+        msg = r.json()
+    
+    # Disable all action row buttons
+    comps = msg.get("components", [])
+    for row in comps:
+        if row.get("type") == 1:  # Action row
+            for btn in row.get("components", []):
+                if btn.get("type") == 2:  # Button
+                    btn["disabled"] = True
+    
+    async with httpx.AsyncClient() as c:
+        r = await c.patch(f"{API}/channels/{channel_id}/messages/{message_id}", headers=HEADERS,
+                          json={"components": comps})
+        if r.status_code == 200:
+            return json.dumps({"success": True})
+        return json.dumps({"error": r.text})
+
 if __name__ == "__main__":
     if not TOKEN or len(TOKEN) < 10:
         print("MCP: no valid Discord token found", file=sys.stderr)

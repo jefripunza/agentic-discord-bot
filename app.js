@@ -116,8 +116,50 @@ async function patchMsg(intToken, content) {
 
 // ─── Interactions ───
 app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (req, res) => {
-  const { type, data, guild_id, channel_id, member, token: intToken } = req.body;
+  const { type, data, guild_id, channel_id, member, token: intToken, message } = req.body;
+
+  // PING
   if (type === InteractionType.PING) return res.send({ type: InteractionResponseType.PONG });
+
+  // ═══ BUTTON CLICK (MESSAGE_COMPONENT) ═══
+  if (type === InteractionType.MESSAGE_COMPONENT) {
+    const customId = data?.custom_id || '';
+    const msgId = message?.id;
+
+    // Disable buttons immediately
+    if (msgId) {
+      try { await tool('disable_buttons', { guild_id, channel_id: channel_id, message_id: msgId }); } catch (_) {}
+    }
+
+    const userMention = '<@' + (member?.user?.id || '') + '>';
+
+    if (customId === 'jual_emas' || customId === 'beli_emas') {
+      const arah = customId === 'jual_emas' ? 'JUAL' : 'BELI';
+      res.send({ type: 5 }); // Defer
+
+      // Get current message content for context
+      let msgContent = message?.content || '';
+
+      // AI analysis
+      const analysis = await callAI(
+        `User clicked "${arah}" on monitoring message.\n\nMessage context:\n${msgContent.slice(0, 1500)}\n\nAnalyze: what happens if user ${arah.toLowerCase()}s emas today based on the data? Include profit/loss estimation, risks, and recommendation. Respond in Bahasa Indonesia with markdown.`,
+        'You are a gold trading analyst. Give realistic analysis with profit/loss scenarios.'
+      );
+
+      // Send analysis to ai-response channel
+      const report = `**${userMention} klik ${arah}**\n\n${analysis || 'Analisa tidak tersedia.'}`;
+      await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: report.slice(0, 1900) });
+
+      // Reply to the interaction
+      await patchMsg(intToken, '✅ **' + arah + '** dianalisa.\nHasil analisa di <#' + AI_RESPONSE_CHANNEL + '>.');
+      return;
+    }
+
+    // Unknown button
+    return res.send({ type: 4, data: { content: '❌ Tombol tidak dikenal.', flags: 64 } });
+  }
+
+  // ═══ SLASH COMMANDS ═══
   if (type !== InteractionType.APPLICATION_COMMAND) return res.status(400).json({ error: 'unknown type' });
 
   const { name, options } = data;
@@ -197,50 +239,56 @@ Untuk perintah seperti "buat channel X", "hapus channel Y", "rename channel Z ja
 
 Untuk pertanyaan atau perintah lain, jawab seperti biasa.`;
 
-    await patchMsg(intToken, '🧠 **Menganalisa permintaan...**');
+    await patchMsg(intToken, '🧠 **Menganalisa...**');
 
-    // Try AI first
-    let answer = await callAI(prompt, sysMsg);
+    // Classify intent: is this a Discord action or a general query?
+    const classifyPrompt = `Classify this user request: "${prompt}"
+    
+Respond with exactly one word:
+- ACTION if user clearly wants to create/delete/rename/edit a Discord channel
+- QUERY for anything else (questions, cron jobs, analysis, reports, etc.)`;
 
-    // Retry once on error
-    if (answer.startsWith('❌')) {
-      answer = await callAI(prompt, sysMsg);
-    }
+    const intent = await callAI(classifyPrompt, 'You are a classifier. Respond with one word: ACTION or QUERY.');
+    const isAction = intent.trim().toUpperCase() === 'ACTION';
 
-    // If AI says it can't or empty, use regex fallback
-    if (!answer || answer.startsWith('❌') || answer.includes('tidak dapat') || answer.includes('tidak punya') || answer.includes("can't") || answer.includes("don't have")) {
-      const lower = prompt.toLowerCase();
+    if (isAction) {
+      // Execute as Discord action via MCP + regex
+      let answer = await callAI(prompt, `Execute Discord commands. Available: create_channel(name), delete_channel(name_or_id), rename_channel(name_or_id, new_name), set_topic(name_or_id, topic), send_message(name_or_id, content), list_channels(), get_channel(name_or_id). Guild: ${guild_id}
 
-      // Create channel
-      const cm = lower.match(/(?:buatkan|buat|create|bikin|bangun)\s+(?:channel|saluran)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))/i);
-      if (cm) {
-        await patchMsg(intToken, '🔧 **Membuat channel...**');
-        const raw = (cm[1] || cm[2] || '').trim();
-        const ch = await tool('create_channel', { guild_id, name: raw });
-        answer = ch.id ? '✅ Channel <#' + ch.id + '> (`#' + ch.name + '`) dibuat.' : '❌ Gagal: ' + (ch.error || 'unknown');
+ONLY execute if the user EXPLICITLY asks to create/delete/rename/edit a Discord channel.
+If unclear, respond with "TIDAK JELAS" and explain why.`);
+
+      if (answer.startsWith('❌') || answer === 'TIDAK JELAS') {
+        answer = await callAI(prompt, `Execute Discord commands. Same tools.
+
+Rules:
+- "buat/bikin channel X" → create_channel
+- "hapus/delete channel X" → delete_channel  
+- "rename X jadi Y" → rename_channel
+- Any tool use MUST match the user's exact intent
+
+Respond with the RESULT of the action, or explain what you did.`);
       }
 
-      // Delete channel
-      if (!answer || answer.startsWith('❌') || answer === '') {
-        const dm = lower.match(/(?:hapus|delete|remove)\s+(?:channel)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))/i);
-        if (dm) {
-          await patchMsg(intToken, '🔧 **Menghapus channel...**');
-          const raw = (dm[1] || dm[2] || '').trim();
-          const delResult = await tool('delete_channel', { guild_id, name_or_id: raw });
-          answer = delResult.success ? '✅ Channel dihapus.' : '❌ Gagal: ' + (delResult.error || 'channel tidak ditemukan');
+      // Regex fallback for clear channel operations
+      if (!answer || answer.includes('TIDAK JELAS') || answer.includes("can't") || answer.includes('tidak dapat')) {
+        const lower = prompt.toLowerCase();
+        const cm = lower.match(/(?:buatkan|buat|create|bikin|bangun)\s+(?:channel|saluran)?\s*(?:"([^"]+)"|([a-z0-9\s-]+))/i);
+        if (cm) {
+          const raw = (cm[1] || cm[2] || '').trim();
+          const ch = await tool('create_channel', { guild_id, name: raw });
+          answer = ch.id ? '✅ Channel <#' + ch.id + '> dibuat.' : '❌ Gagal: ' + (ch.error || 'unknown');
         }
       }
+
+      if (!answer) answer = '✅ Selesai.';
+      await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: '**Prompt:** ' + prompt + '\n\n' + answer.slice(0, 1900) });
+      await patchMsg(intToken, '✅ **Selesai.**\nResponse di <#' + AI_RESPONSE_CHANNEL + '>.');
+    } else {
+      // General query → Hermes handles it (just acknowledge, the real processing is here)
+      await patchMsg(intToken, '📨 **Permintaan diterima.**\nHermes Agent sedang memproses...\nResponse akan muncul di <#' + AI_RESPONSE_CHANNEL + '>.');
+      await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: '**Prompt dari <@' + (member?.user?.id || '') + '>:**\n' + prompt });
     }
-
-    if (!answer) answer = '✅ Selesai.';
-
-    // Send response to ai-response channel
-    const mention = '<@' + (member?.user?.id || '') + '>';
-    const aiMsg = '**Prompt:** ' + prompt + '\n\n' + answer;
-    await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: aiMsg.slice(0, 1900) });
-
-    // Update deferred message to show completion
-    await patchMsg(intToken, '✅ **Selesai.**\nResponse dikirim ke <#' + AI_RESPONSE_CHANNEL + '>.');
     return;
   }
 
