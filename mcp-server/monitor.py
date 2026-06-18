@@ -171,12 +171,12 @@ Format PERSIS (1 baris kosong antar bagian):
 🗓️ [HARI + TANGGAL JAWA], [TANGGAL] — ⏰ [JAM] WIB
 
 🥇 HARGA EMAS ANTAM (Logam Mulia)
-• Harga Beli (buyback 1g): RpX.XXX.XXX (▼/▲)
-• Harga Jual (1g): RpX.XXX.XXX (▼/▲)
+• Harga Beli (buyback 1g): RpX.XXX.XXX (▼ X,X%)
+• Harga Jual (1g): RpX.XXX.XXX (▲ X,X%)
 • Spread: RpX.XXX/g (X,X%)
 
 💱 NILAI TUKAR
-• 1 USD = Rp XX.XXX (▲/▼)
+• 1 USD = Rp XX.XXX (▲ X,X%)
 • 1 CNY = Rp X.XXX
 • 1 RUB = Rp XXX
 • BRICS: Rp X.XXX
@@ -197,7 +197,7 @@ Update: [TANGGAL] [JAM] WIB
 
 Rules:
 1. HARI: Indonesia + Jawa (contoh: Kamis Pon)
-2. ▼/▲ untuk naik/turun harga dari perkiraan (gunakan → jika stabil)
+2. FORMAT NAIK/TURUN: gunakan (▼ X,X%) atau (▲ X,X%) atau (→ X,X%) — dengan persentase perubahan, pakai koma sebagai desimal
 3. JANGAN tambah disclaimer
 4. Rekomendasi: JUAL jika spread >10%, BELI jika <6%, TAHAN 6-10%
 5. GUNAKAN data berita dan promo yang sudah diberikan, jangan diubah"""
