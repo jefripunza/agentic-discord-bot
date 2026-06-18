@@ -249,7 +249,7 @@ Untuk pertanyaan atau perintah lain, jawab seperti biasa.`;
     let actionResult = null;
 
     // 1a. Rename channel: "ubah nama X jadi Y" / "rename X ke Y" / "ganti nama X menjadi Y"
-    const renameMatch = lower.match(/(?:ubah|rename|ganti)\s+(?:nama\s+)?(?:channel\s+)?#?(\S[^jadi]+?)\s*(?:jadi|ke|menjadi|to)\s+(.+)/i);
+    const renameMatch = lower.match(/(?:ubah|rename|ganti)\s+(?:nama\s+|channel\s+)?(.+?)\s+(?:jadi|ke|menjadi|to)\s+(.+)/i);
     if (renameMatch) {
       actionCmd = 'RENAME';
       const chName = renameMatch[1].trim();
