@@ -8,6 +8,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 const app = express();
 const PORT = process.env.PORT || 8899;
 const GUILD_ID = process.env.GUILD_ID || '1516963494636027924';
+const CHANNEL_MANAGEMENT = '1516965584296874156';
+const AI_RESPONSE_CHANNEL = '1517028462437859412';
 
 // ─── MCP Client ───
 let mcpClient = null;
@@ -143,11 +145,15 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (re
 
   // ═══ /prompt ═══
   if (name === 'prompt') {
+    // Only in channel-management
+    if (channel_id !== CHANNEL_MANAGEMENT) {
+      return res.send({ type: 4, data: { content: '❌ /prompt hanya bisa digunakan di <#' + CHANNEL_MANAGEMENT + '>' } });
+    }
+
     const prompt = options?.find(o => o.name === 'prompt')?.value;
     if (!prompt) return res.send({ type: 4, data: { content: '❌ Prompt wajib diisi.' } });
     res.send({ type: 5 });
 
-    // Use AI + MCP to process
     const sysMsg = `Kamu adalah bot Discord yang BISA mengeksekusi perintah. Anda punya akses ke tools Discord:
 - create_channel(name)
 - delete_channel(name_or_id)
@@ -183,7 +189,7 @@ Untuk pertanyaan atau perintah lain, jawab seperti biasa.`;
         await patchMsg(intToken, '🔧 **Membuat channel...**');
         const raw = (cm[1] || cm[2] || '').trim();
         const ch = await tool('create_channel', { guild_id, name: raw });
-        answer = ch.id ? `✅ Channel <#${ch.id}> (\`#${ch.name}\`) dibuat.` : `❌ Gagal: ${ch.error || 'unknown'}`;
+        answer = ch.id ? '✅ Channel <#' + ch.id + '> (`#' + ch.name + '`) dibuat.' : '❌ Gagal: ' + (ch.error || 'unknown');
       }
 
       // Delete channel
@@ -192,14 +198,21 @@ Untuk pertanyaan atau perintah lain, jawab seperti biasa.`;
         if (dm) {
           await patchMsg(intToken, '🔧 **Menghapus channel...**');
           const raw = (dm[1] || dm[2] || '').trim();
-          answer = await tool('delete_channel', { guild_id, name_or_id: raw });
-          answer = answer.success ? '✅ Channel dihapus.' : `❌ Gagal: ${answer.error || 'channel tidak ditemukan'}`;
+          const delResult = await tool('delete_channel', { guild_id, name_or_id: raw });
+          answer = delResult.success ? '✅ Channel dihapus.' : '❌ Gagal: ' + (delResult.error || 'channel tidak ditemukan');
         }
       }
     }
 
     if (!answer) answer = '✅ Selesai.';
-    await patchMsg(intToken, answer);
+
+    // Send response to ai-response channel
+    const mention = '<@' + (member?.user?.id || '') + '>';
+    const aiMsg = '**Prompt:** ' + prompt + '\n\n' + answer;
+    await tool('send_message', { guild_id, name_or_id: AI_RESPONSE_CHANNEL, content: aiMsg.slice(0, 1900) });
+
+    // Update deferred message to show completion
+    await patchMsg(intToken, '✅ **Selesai.**\nResponse dikirim ke <#' + AI_RESPONSE_CHANNEL + '>.');
     return;
   }
 
