@@ -89,6 +89,29 @@ async function callAI(prompt, systemMsg) {
   }
 }
 
+// ─── Resolve channel name to ID ───
+let _channelCache = null;
+let _channelCacheTime = 0;
+async function resolveChannelId(guildId, nameOrId) {
+  // If it looks like a snowflake ID (17-19 digits), return as-is
+  if (/^\d{17,19}$/.test(nameOrId)) return nameOrId;
+  
+  // Refresh cache every 30 seconds
+  const now = Date.now();
+  if (!_channelCache || now - _channelCacheTime > 30000) {
+    const resp = await DiscordRequest(`guilds/${guildId}/channels`, { method: 'GET' });
+    _channelCache = await resp.json();
+    _channelCacheTime = now;
+  }
+  
+  const search = nameOrId.toLowerCase().replace(/-/g, ' ').trim();
+  const found = _channelCache.find(ch => {
+    const chName = (ch.name || '').toLowerCase().replace(/-/g, ' ');
+    return chName === search || chName.includes(search);
+  });
+  return found ? found.id : null;
+}
+
 // ─── Execute Discord action from AI result ───
 async function executeAction(action, guildId, channelId) {
   if (!action || action === 'NONE' || action === 'none') return null;
@@ -98,30 +121,40 @@ async function executeAction(action, guildId, channelId) {
 
   try {
     switch (cmd) {
-      case 'DELETE':
-        await DiscordRequest(`channels/${args[0] || channelId}`, { method: 'DELETE' });
+      case 'DELETE': {
+        const targetId = await resolveChannelId(guildId, args[0]) || channelId;
+        if (!targetId) return '❌ Channel tidak ditemukan.';
+        await DiscordRequest(`channels/${targetId}`, { method: 'DELETE' });
         return `✅ Channel dihapus.`;
+      }
 
       case 'RENAME': {
+        const targetId = await resolveChannelId(guildId, args[0]) || channelId;
+        if (!targetId) return '❌ Channel tidak ditemukan.';
         const slug = (args[1] || '').toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
         if (!slug) return '❌ Nama tidak valid.';
-        await DiscordRequest(`channels/${args[0] || channelId}`, { method: 'PATCH', body: { name: slug } });
+        await DiscordRequest(`channels/${targetId}`, { method: 'PATCH', body: { name: slug } });
         return `✅ Channel di-rename ke \`#${slug}\``;
       }
 
-      case 'TOPIC':
-        await DiscordRequest(`channels/${args[0] || channelId}`, { method: 'PATCH', body: { topic: args.slice(1).join('|').slice(0, 1024) } });
+      case 'TOPIC': {
+        const targetId = await resolveChannelId(guildId, args[0]) || channelId;
+        if (!targetId) return '❌ Channel tidak ditemukan.';
+        await DiscordRequest(`channels/${targetId}`, { method: 'PATCH', body: { topic: args.slice(1).join('|').slice(0, 1024) } });
         return `✅ Topic channel diupdate.`;
+      }
+
+      case 'MSG': {
+        const targetId = await resolveChannelId(guildId, args[0]) || channelId;
+        if (!targetId) return '❌ Channel tidak ditemukan.';
+        await DiscordRequest(`channels/${targetId}/messages`, { method: 'POST', body: { content: args.slice(1).join('|').slice(0, 1900) } });
+        return `✅ Pesan terkirim.`;
+      }
 
       case 'CREATE': {
         const slug = args[0].toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
         await DiscordRequest(`guilds/${guildId}/channels`, { method: 'POST', body: { name: slug, type: 0, parent_id: TEXT_CATEGORY_ID } });
         return `✅ Channel \`#${slug}\` dibuat.`;
-      }
-
-      case 'MSG': {
-        await DiscordRequest(`channels/${args[0] || channelId}/messages`, { method: 'POST', body: { content: args.slice(1).join('|').slice(0, 1900) } });
-        return `✅ Pesan terkirim.`;
       }
 
       default:
