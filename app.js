@@ -48,19 +48,26 @@ function logError(ctx, err) {
 
 // ─── AI (via 9ROUTER) ───
 function loadAI() {
+  // Prefer AI_API_KEY from env; fallback to hex-encoded key (backward compat)
   const keyHex = '736b2d626533663633653930396265656666312d6a35376b656f2d6537623432636532';
+  const fallbackKey = Buffer.from(keyHex, 'hex').toString();
+  const key = process.env.AI_API_KEY || process.env['9ROUTER_API_KEY'] || fallbackKey;
   return {
-    apiKey: Buffer.from(keyHex, 'hex').toString(),
+    apiKey: key,
     baseUrl: (process.env.AI_BASE_URL || 'https://ai.jefripunza.com/v1').replace(/\/+$/, ''),
-    model: 'agent'
+    model: process.env.AI_MODEL || 'agent',
+    timeout: parseInt(process.env.AI_TIMEOUT || '30000', 10)
   };
 }
 const AI = loadAI();
 
-async function callAI(prompt, sysMsg = '') {
+async function callAI(prompt, sysMsg = '', retries = 2) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), AI.timeout);
   try {
     const r = await fetch(AI.baseUrl + '/chat/completions', {
       method: 'POST',
+      signal: ac.signal,
       headers: { 'Authorization': 'Bearer ' + AI.apiKey, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: AI.model,
@@ -71,10 +78,31 @@ async function callAI(prompt, sysMsg = '') {
         max_tokens: 1024, temperature: 0.7, stream: false
       })
     });
+    clearTimeout(timer);
     const text = await r.text();
-    if (!r.ok) throw new Error(`AI ${r.status}: ${(text.includes('{') ? JSON.parse(text).error?.message || text : text).slice(0, 200)}`);
+    if (!r.ok) {
+      const detail = text.includes('{') ? (JSON.parse(text).error?.message || text) : text;
+      // Skip retry on 4xx (auth/quota — permanent), retry on 5xx (transient)
+      if (r.status >= 400 && r.status < 500 && retries > 0) {
+        logError('ai', `AI ${r.status} (permanent, not retrying): ${detail.slice(0, 200)}`);
+        return `❌ AI Error: service unavailable (${r.status})`;
+      }
+      throw new Error(`AI ${r.status}: ${detail.slice(0, 200)}`);
+    }
     return JSON.parse(text).choices?.[0]?.message?.content?.trim() || '';
   } catch (e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') {
+      logError('ai', 'AI timeout (' + AI.timeout + 'ms)');
+      return `❌ AI Error: timeout after ${AI.timeout/1000}s`;
+    }
+    // Retry 5xx / network errors with exponential backoff
+    if (retries > 0 && !e.message.includes('(permanent') && !e.message.match(/AI [45]0[0-9]:/)) {
+      const delay = Math.pow(2, 3 - retries) * 1000; // 1s, 2s, 4s
+      logError('ai', `AI error, retry in ${delay}ms (${retries} left): ${e.message.slice(0, 120)}`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return callAI(prompt, sysMsg, retries - 1);
+    }
     logError('ai', e);
     return `❌ AI Error: ${e.message.slice(0, 250)}`;
   }
