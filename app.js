@@ -126,7 +126,38 @@ async function executeAction(action, guildId, channelId) {
   }
 }
 
-// ─── Try to parse action from AI response ───
+// ─── Follow-up message helper (PATCH deferred response) ───
+async function patchFollowup(intToken, content, retries = 3) {
+  const url = `https://discord.com/api/v10/webhooks/${process.env.CLIENT_ID}/${encodeURIComponent(intToken)}/messages/@original`;
+  for (let i = 0; i < retries; i++) {
+    try {
+      const r = await fetch(url, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: content.slice(0, 1900) })
+      });
+      if (r.ok) return true;
+    } catch (_) { await new Promise(r => setTimeout(r, 500 * (i + 1))); }
+  }
+  return false;
+}
+
+// ─── Process AI prompt with error handling + retry ───
+async function processAIPrompt(prompt, sysPrompt, guildId, channelId) {
+  let aiText = await callAI(prompt, sysPrompt);
+
+  // If AI error, retry once
+  if (aiText.startsWith('❌ AI Error:')) {
+    aiText = await callAI(prompt, sysPrompt);
+  }
+  if (aiText.startsWith('❌ AI Error:')) {
+    logError('AI_final', aiText);
+    return { error: true, text: aiText.replace('❌ AI Error: ', '') };
+  }
+
+  const { action, text } = parseAction(aiText);
+  const result = action ? await executeAction(action, guildId, channelId) : null;
+  return { error: false, text, action, result };
+}
 function parseAction(text) {
   const lines = text.split('\n').map(l => l.trim());
   // Look for ACTION: line
@@ -176,7 +207,9 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (re
 
       res.send({ type: 5 }); // Defer
 
-      // AI prompt for action extraction
+      // Langsung kirim "processing" message
+      await patchFollowup(intToken, '🧠 **Sedang memproses instruksi...**');
+
       const sysPrompt = `Extract a Discord action from user request. RESPOND ONLY WITH:
 ACTION: CMD|channel_id|arg1|arg2
 CMDs: DELETE, RENAME|new_name, TOPIC|text, CREATE|channel_name, MSG|channel_id|text, NONE
@@ -184,21 +217,20 @@ Example: "hapus channel" -> ACTION: DELETE|channel_id
 Example: "rename jadi lobby" -> ACTION: RENAME|channel_id|lobby
 Use the exact channel_id: ${chId}. If unsure, use ACTION: NONE`;
 
-      const aiText = await callAI(
+      const result = await processAIPrompt(
         `User instruction on channel ${chId}: ${instruksi}`,
-        sysPrompt
+        sysPrompt, guild_id, chId
       );
 
-      const { action, text } = parseAction(aiText);
-      const result = action ? await executeAction(action, guild_id, chId) : null;
-      const content = result || text || `✅ Instruksi diterima.`;
-
-      try {
-        await fetch(`https://discord.com/api/v10/webhooks/${process.env.CLIENT_ID}/${encodeURIComponent(intToken)}/messages/@original`, {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: content.slice(0, 1900) })
-        });
-      } catch (e) { logError('followup', e); }
+      let content;
+      if (result.error) {
+        content = `❌ **Gagal memproses instruksi**\n> \`${result.text.slice(0, 150)}\`\n🧠 **Self-fixing agent** sudah diberitahu untuk perbaiki masalah ini. Coba lagi dalam beberapa menit.`;
+        await patchFollowup(intToken, content);
+        logError('edit_fail', result.text);
+      } else {
+        content = result.result || result.text || `✅ Instruksi diterima.`;
+        await patchFollowup(intToken, content);
+      }
       return;
     }
 
@@ -209,20 +241,25 @@ Use the exact channel_id: ${chId}. If unsure, use ACTION: NONE`;
 
       res.send({ type: 5 }); // Defer
 
+      await patchFollowup(intToken, '🧠 **Sedang memproses prompt...**');
+
       const sysPrompt = `Kamu adalah Hermes Discord Bot. Jawab user dengan informatif.
 Gunakan format ACTION:CMD|args jika perlu eksekusi. ACTION: NONE untuk no action.`;
 
-      const aiText = await callAI(`[CHANNEL=${channel_id}] ${prompt}`, sysPrompt);
-      const { action, text } = parseAction(aiText);
-      const result = action ? await executeAction(action, guild_id, channel_id) : null;
-      const content = result ? result + '\n' + text : text;
+      const result = await processAIPrompt(
+        `[CHANNEL=${channel_id}] ${prompt}`,
+        sysPrompt, guild_id, channel_id
+      );
 
-      try {
-        await fetch(`https://discord.com/api/v10/webhooks/${process.env.CLIENT_ID}/${encodeURIComponent(intToken)}/messages/@original`, {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: (content || '✅ Selesai.').slice(0, 1900) })
-        });
-      } catch (e) { logError('followup', e); }
+      let content;
+      if (result.error) {
+        content = `❌ **Gagal memproses prompt**\n> \`${result.text.slice(0, 150)}\`\n🧠 **Self-fixing agent** sudah diberitahu. Coba lagi dalam beberapa menit.`;
+        await patchFollowup(intToken, content);
+        logError('prompt_fail', result.text);
+      } else {
+        content = (result.result ? result.result + '\n' : '') + (result.text || '');
+        await patchFollowup(intToken, content || '✅ Selesai.');
+      }
       return;
     }
 
