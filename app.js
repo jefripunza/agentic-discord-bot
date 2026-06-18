@@ -146,10 +146,10 @@ async function processAIPrompt(prompt, sysPrompt, guildId, channelId, intToken) 
   // Step 1: Analyzing
   await patchFollowup(intToken, '🧠 **Menganalisa permintaan...**');
 
+  // Retry with exponential backoff (3 attempts: 1s, 2s, 4s)
   let aiText = await callAI(prompt, sysPrompt);
-
-  // Retry once on error
-  if (aiText.startsWith('❌ AI Error:')) {
+  for (let attempt = 2; attempt <= 3 && aiText.startsWith('❌ AI Error:'); attempt++) {
+    await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt - 2)));
     aiText = await callAI(prompt, sysPrompt);
   }
   if (aiText.startsWith('❌ AI Error:')) {
