@@ -35,123 +35,170 @@ HTTP_HEADERS = {
 
 # ── Fetchers ──
 async def fetch_gold():
-    """Fetch gold price from various sources."""
+    """Fetch gold price from IndoGold."""
     results = {"jual": None, "beli": None}
     async with httpx.AsyncClient(timeout=10) as c:
-        # Try IndoGold API
+        # Source 1: indogold API
         try:
-            r = await c.get("https://www.logammulia.com/api/v1/price", headers=HTTP_HEADERS)
+            r = await c.get("https://indogold.id/api/v2/prices/antam", headers=HTTP_HEADERS)
             if r.status_code == 200:
                 d = r.json()
                 if isinstance(d, dict):
-                    results["jual"] = d.get("harga_jual") or d.get("sell", 0)
-                    results["beli"] = d.get("harga_beli") or d.get("buy", 0)
+                    g = d.get("prices", {}) or d
+                    results["jual"] = int(g.get("buy", 0) or g.get("jual", 0) or 0)
+                    results["beli"] = int(g.get("sell", 0) or g.get("beli", 0) or 0)
         except: pass
 
+        # Source 2: try scraping logammulia
         if not results["jual"]:
-            # Try scraping IndoGold
             try:
-                r = await c.get("https://www.logammulia.com/")
+                r = await c.get("https://www.logammulia.com/", headers=HTTP_HEADERS)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, "lxml")
-                    for el in soup.find_all(string=re.compile(r"1\s*gram")):
-                        parent = el.parent
-                        txt = parent.get_text() if parent else ""
-                        nums = re.findall(r"(\d[\d.,]*)", txt.replace(",", ""))
-                        if len(nums) >= 2:
-                            results["jual"] = int(nums[0])
-                            results["beli"] = int(nums[1])
+                    nums = []
+                    for el in soup.find_all(text=re.compile(r"\b\d{1,3}(?:\.\d{3})*\b")):
+                        n = re.sub(r"[^0-9]", "", el.strip())
+                        if len(n) >= 6 and int(n) > 100000:
+                            nums.append(int(n))
+                    if len(nums) >= 2:
+                        results["jual"] = max(nums)
+                        results["beli"] = min(nums)
             except: pass
 
-        if not results["jual"]:
-            # Fallback
-            results["jual"] = 1700000
-            results["beli"] = 1550000
+        # Hardcoded fallback
+        if not results["jual"]: results["jual"] = 1700000
+        if not results["beli"]: results["beli"] = 1550000
     return results
 
 async def fetch_rates():
-    """Fetch exchange rates."""
-    rates = {"usd": None, "cny": None, "rub": None}
+    """Fetch exchange rates with multiple fallbacks."""
+    rates = {"usd": None, "cny": None, "rub": None, "cny_idr": None}
     async with httpx.AsyncClient(timeout=10) as c:
+        # Source 1: exchangerate-api (more reliable)
         try:
-            r = await c.get("https://api.frankfurter.app/latest?from=USD&to=IDR,CNY,RUB")
+            r = await c.get("https://open.er-api.com/v6/latest/USD")
             if r.status_code == 200:
                 d = r.json()
-                rates["usd"] = d["rates"].get("IDR", 16500)
-                rates["cny"] = d["rates"].get("CNY", 7.2)
-                rates["rub"] = d["rates"].get("RUB", 88)
-                try:
-                    idr_r = await c.get("https://api.frankfurter.app/latest?from=CNY&to=IDR")
-                    if idr_r.status_code == 200:
-                        rates["cny_idr"] = idr_r.json()["rates"].get("IDR", 2200)
-                except: pass
-        except:
-            rates["usd"] = 16500
-            rates["cny"] = 7.25
-            rates["rub"] = 88.5
-            rates["cny_idr"] = 2270
+                rt = d.get("rates", {})
+                rates["usd"] = int(rt.get("IDR", 0))
+                rates["cny"] = rt.get("CNY")
+                rates["rub"] = rt.get("RUB")
+        except: pass
+
+        # CNY→IDR calculation
+        if rates["usd"] and rates["cny"]:
+            try:
+                rates["cny_idr"] = int(rates["usd"] / rates["cny"])
+            except: pass
+
+        # Source 2: frankfurter fallback
+        if not rates["usd"]:
+            try:
+                r = await c.get("https://api.frankfurter.app/latest?from=USD&to=IDR,CNY,RUB")
+                if r.status_code == 200:
+                    d = r.json()
+                    rt = d.get("rates", {})
+                    rates["usd"] = int(rt.get("IDR", 0))
+                    rates["cny"] = rt.get("CNY")
+                    rates["rub"] = rt.get("RUB")
+            except: pass
+
+    # Hardcoded fallback (typical values)
+    if not rates["usd"]: rates["usd"] = 16500
+    if not rates["cny"]: rates["cny"] = 7.25
+    if not rates["rub"]: rates["rub"] = 88.5
+    if not rates["cny_idr"]: rates["cny_idr"] = 2270
     return rates
 
 async def fetch_ai_promos():
-    """Search for AI promo pricing (simplified)."""
+    """List available AI models from known endpoints."""
     promos = []
-    async with httpx.AsyncClient(timeout=8) as c:
+    async with httpx.AsyncClient(timeout=10) as c:
+        # 1. Check 9ROUTER (our own endpoint)
         try:
-            r = await c.get("https://api.openai.com/v1/models", timeout=5)
-            promos.append(f"OpenAI: API aktif ({r.status_code if r.status_code < 400 else 'perlu cek'})")
-        except:
-            promos.append("OpenAI: timeout")
-        try:
-            r = await c.get("https://ai.jefripunza.com/v1/models",
-                          headers={"Authorization": None}, timeout=5)
+            r = await c.get("https://ai.jefripunza.com/v1/models")
             if r.status_code == 200:
-                models = r.json()
-                if isinstance(models, list):
-                    promos.append(f"9ROUTER: {len(models)} model tersedia")
-                elif isinstance(models, dict):
-                    mlist = models.get("data", [])
-                    promos.append(f"9ROUTER: {len(mlist)} model")
-        except:
-            pass
+                data = r.json()
+                models = data.get("data", data) if isinstance(data, dict) else data
+                n = len(models) if isinstance(models, list) else 0
+                if n > 0:
+                    names = [m.get("id", "") for m in models[:5] if isinstance(m, dict)]
+                    promos.append(f"9ROUTER: {n} model (~{', '.join(names[:2])}...)" if names else f"9ROUTER: {n} model")
+                else:
+                    promos.append("9ROUTER: online (model list empty)")
+            else:
+                promos.append(f"9ROUTER: status {r.status_code}")
+        except Exception as e:
+            promos.append(f"9ROUTER: error ({str(e)[:30]})")
+
+        # 2. OpenAI
         try:
-            r = await c.get("https://generativelanguage.googleapis.com/v1beta/models",
-                          timeout=5)
-            if r.status_code == 200:
-                d = r.json()
-                promos.append(f"Google Gemini: {len(d.get('models',[]))} model")
+            r = await c.get("https://api.openai.com/v1/models",
+                          headers={"Authorization": "Bearer none"})
+            if r.status_code in (200, 401):
+                promos.append("OpenAI: API online")
+            else:
+                promos.append(f"OpenAI: status {r.status_code}")
         except:
-            pass
+            promos.append("OpenAI: unreachable")
+
+        # 3. Groq
+        try:
+            r = await c.get("https://api.groq.com/openai/v1/models",
+                          headers={"Authorization": "Bearer none"})
+            if r.status_code in (200, 401):
+                promos.append("Groq: API online")
+        except:
+            promos.append("Groq: unreachable")
+
     if not promos:
-        promos.append("Data promo tidak tersedia saat ini")
+        promos.append("Semua provider unreachable")
     return promos
 
 async def fetch_news():
-    """Fetch recent news headlines for sentiment."""
+    """Fetch news headlines from multiple sources."""
     news = []
-    async with httpx.AsyncClient(timeout=8) as c:
+    async with httpx.AsyncClient(timeout=10) as c:
+        # Source 1: CNBC Indonesia RSS (most reliable)
         try:
-            r = await c.get("https://www.antaranews.com/terkini/ekonomi",
+            r = await c.get("https://www.cnbcindonesia.com/market/feed",
                           headers=HTTP_HEADERS)
             if r.status_code == 200:
-                soup = BeautifulSoup(r.text, "lxml")
-                for item in soup.select("article h3 a, .simple-post-title a")[:5]:
-                    txt = item.get_text(strip=True)
-                    if txt:
-                        news.append(txt)
+                soup = BeautifulSoup(r.text, "xml")
+                for item in soup.find_all("item")[:5]:
+                    title = item.find("title")
+                    if title:
+                        news.append(title.get_text(strip=True))
         except: pass
+
+        # Source 2: Antara News RSS
+        if not news:
+            try:
+                r = await c.get("https://www.antaranews.com/rss/terkini/ekonomi",
+                              headers=HTTP_HEADERS)
+                if r.status_code == 200:
+                    soup = BeautifulSoup(r.text, "xml")
+                    for item in soup.find_all("item")[:5]:
+                        title = item.find("title")
+                        if title:
+                            news.append(title.get_text(strip=True))
+            except: pass
+
+        # Source 3: simple scrape
         if not news:
             try:
                 r = await c.get("https://www.cnbcindonesia.com/market",
                               headers=HTTP_HEADERS)
                 if r.status_code == 200:
                     soup = BeautifulSoup(r.text, "lxml")
-                    for item in soup.select("article h2 a")[:5]:
-                        txt = item.get_text(strip=True)
-                        if txt and "login" not in txt.lower():
+                    for el in soup.select("article h2 a, h3 a, .title, .media-title")[:5]:
+                        txt = el.get_text(strip=True)
+                        if txt and len(txt) > 10:
                             news.append(txt)
             except: pass
+
     if not news:
-        news = ["Data berita tidak tersedia saat ini"]
+        news = ["Belum ada berita terbaru saat ini"]
     return news
 
 # ── Format message ──
