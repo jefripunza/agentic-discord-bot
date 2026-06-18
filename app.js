@@ -6,11 +6,27 @@ import {
   verifyKeyMiddleware,
 } from 'discord-interactions';
 import { DiscordRequest } from './utils.js';
-import { readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync, appendFileSync } from 'fs';
+import { join } from 'path';
 
 const app = express();
 const PORT = process.env.PORT || 8899;
 const TEXT_CATEGORY_ID = process.env.TEXT_CATEGORY_ID || '1516963495499792475';
+
+// ─── Error logger ───
+const LOG_DIR = process.env.HOME + '/.hermes/logs';
+const ERR_LOG = join(LOG_DIR, 'discord-bot-error.log');
+function logError(context, err) {
+  const time = new Date().toISOString();
+  const msg = typeof err === 'string' ? err : (err?.message || String(err));
+  const stack = err?.stack ? '\n' + err.stack : '';
+  const entry = `[${time}] [${context}] ${msg}${stack}\n`;
+  try {
+    if (!existsSync(LOG_DIR)) require('fs').mkdirSync(LOG_DIR, { recursive: true });
+    appendFileSync(ERR_LOG, entry);
+  } catch (_) {}
+  console.error(`[ERR] ${context}: ${msg.slice(0, 200)}`);
+}
 
 // ─── Load AI config from hardcoded hex (bypass redaction) ───
 function loadAiConfig() {
@@ -50,10 +66,12 @@ async function callAI(prompt, systemMsg) {
     }
     let data;
     try { data = JSON.parse(text); } catch (e) {
+      logError('AI_parse', e);
       throw new Error('AI response parse failed: ' + text.slice(0, 200));
     }
     return data.choices?.[0]?.message?.content?.trim() || 'Tidak ada respons AI.';
   } catch (e) {
+    logError('AI_call', e);
     return `❌ AI Error: ${e.message.slice(0, 250)}`;
   }
 }
@@ -97,6 +115,7 @@ async function executeAction(action, guildId, channelId) {
         return null;
     }
   } catch (err) {
+    logError('execute_action', err);
     return `❌ Gagal: ${err.message.slice(0, 200)}`;
   }
 }
@@ -138,6 +157,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (re
         const ch = await chResp.json();
         return res.send({ type: 4, data: { content: `✅ <#${ch.id}> dibuat (\`#${ch.name}\`)` } });
       } catch (err) {
+        logError('create_channel', err);
         return res.send({ type: 4, data: { content: `❌ Gagal: ${err.message.slice(0, 120)}` } });
       }
     }
@@ -172,7 +192,7 @@ Use the exact channel_id: ${chId}. If unsure, use ACTION: NONE`;
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: content.slice(0, 1900) })
         });
-      } catch (e) { console.log('Follow-up failed:', e.message); }
+      } catch (e) { logError('followup', e); }
       return;
     }
 
@@ -196,7 +216,7 @@ Gunakan format ACTION:CMD|args jika perlu eksekusi. ACTION: NONE untuk no action
           method: 'PATCH', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content: (content || '✅ Selesai.').slice(0, 1900) })
         });
-      } catch (e) { console.log('Follow-up failed:', e.message); }
+      } catch (e) { logError('followup', e); }
       return;
     }
 
@@ -208,6 +228,7 @@ Gunakan format ACTION:CMD|args jika perlu eksekusi. ACTION: NONE untuk no action
         await DiscordRequest(`channels/${channel_id}`, { method: 'PATCH', body: { topic: aturan.slice(0, 1024) } });
         return res.send({ type: 4, data: { content: `✅ Aturan diterapkan.` } });
       } catch (err) {
+        logError('rule_channel', err);
         return res.send({ type: 4, data: { content: `❌ Gagal: ${err.message.slice(0, 120)}` } });
       }
     }

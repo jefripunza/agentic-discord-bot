@@ -1,0 +1,18 @@
+[Unit]
+Description=Discord Application Backend (Node.js)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%u
+WorkingDirectory=/home/p34c3-khyrein/workspace/discord-backend
+ExecStart=/bin/bash /home/p34c3-khyrein/workspace/discord-backend/run.sh
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
