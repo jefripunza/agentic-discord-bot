@@ -187,8 +187,11 @@ Format PERSIS (1 baris kosong antar bagian):
 📰 KUMPULAN BERITA
 {news_bullets}
 
+📰 SENTIMEN
+▸ [sentimen pasar: bearish/neutral/bullish beserta analisa berita di atas]
+
 📊 REKOMENDASI: [JUAL/BELI/TAHAN]
-[Alasan singkat berdasarkan spread & sentimen]
+[Alasan singkat berdasarkan spread, sentimen & berita]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━
 Data: logammulia.com, anekalogam.co.id, exchangerates.org.uk, Google News, 9ROUTER
@@ -200,7 +203,8 @@ Rules:
 2. FORMAT NAIK/TURUN: gunakan (▼ X,X%) atau (▲ X,X%) atau (→ X,X%) — dengan persentase perubahan, pakai koma sebagai desimal
 3. JANGAN tambah disclaimer
 4. Rekomendasi: JUAL jika spread >10%, BELI jika <6%, TAHAN 6-10%
-5. GUNAKAN data berita dan promo yang sudah diberikan, jangan diubah"""
+5. GUNAKAN data berita dan promo yang sudah diberikan, jangan diubah
+6. SENTIMEN: analisa dari berita di atas — apakah bullish, bearish, atau neutral untuk harga emas"""
 
     try:
         async with httpx.AsyncClient(timeout=120) as c:
