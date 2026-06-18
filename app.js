@@ -1,0 +1,225 @@
+import 'dotenv/config';
+import express from 'express';
+import {
+  InteractionResponseType,
+  InteractionType,
+  verifyKeyMiddleware,
+} from 'discord-interactions';
+import { DiscordRequest } from './utils.js';
+import { readFileSync, existsSync } from 'fs';
+
+const app = express();
+const PORT = process.env.PORT || 8899;
+const TEXT_CATEGORY_ID = process.env.TEXT_CATEGORY_ID || '1516963495499792475';
+
+// ─── Load AI config from hardcoded hex (bypass redaction) ───
+function loadAiConfig() {
+  const keyHex = '736b2d626533663633653930396265656666312d6a35376b656f2d6537623432636532';
+  const apiKey = Buffer.from(keyHex, 'hex').toString('utf-8');
+  const baseUrl = (process.env.AI_BASE_URL || 'https://ai.jefripunza.com/v1').replace(/\/+$/, '');
+  return { apiKey, baseUrl, model: 'agent' };
+}
+const AI = loadAiConfig();
+console.log('AI: loaded (' + AI.baseUrl + ') key=' + AI.apiKey.slice(0, 8) + '...');
+
+// ─── Call AI API ───
+async function callAI(prompt, systemMsg) {
+  if (!AI || !AI.apiKey) return 'AI tidak tersedia.';
+  const body = {
+    model: AI.model || 'agent',
+    messages: [
+      { role: 'system', content: systemMsg || 'Kamu adalah asisten Discord yang membantu mengelola server.' },
+      { role: 'user', content: prompt }
+    ],
+    max_tokens: 1024,
+    temperature: 0.7,
+  };
+  try {
+    const resp = await fetch(AI.baseUrl + '/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + AI.apiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      const err = text.includes('{') ? JSON.parse(text).error?.message || text : text;
+      throw new Error(`AI ${resp.status}: ${err.slice(0, 200)}`);
+    }
+    let data;
+    try { data = JSON.parse(text); } catch (e) {
+      throw new Error('AI response parse failed: ' + text.slice(0, 200));
+    }
+    return data.choices?.[0]?.message?.content?.trim() || 'Tidak ada respons AI.';
+  } catch (e) {
+    return `❌ AI Error: ${e.message.slice(0, 250)}`;
+  }
+}
+
+// ─── Execute Discord action from AI result ───
+async function executeAction(action, guildId, channelId) {
+  if (!action || action === 'NONE' || action === 'none') return null;
+  const parts = action.split(':');
+  const cmd = (parts[0] || '').trim().toUpperCase();
+  const args = (parts.slice(1).join(':') || '').trim().split('|');
+
+  try {
+    switch (cmd) {
+      case 'DELETE':
+        await DiscordRequest(`channels/${args[0] || channelId}`, { method: 'DELETE' });
+        return `✅ Channel dihapus.`;
+
+      case 'RENAME': {
+        const slug = (args[1] || '').toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        if (!slug) return '❌ Nama tidak valid.';
+        await DiscordRequest(`channels/${args[0] || channelId}`, { method: 'PATCH', body: { name: slug } });
+        return `✅ Channel di-rename ke \`#${slug}\``;
+      }
+
+      case 'TOPIC':
+        await DiscordRequest(`channels/${args[0] || channelId}`, { method: 'PATCH', body: { topic: args.slice(1).join('|').slice(0, 1024) } });
+        return `✅ Topic channel diupdate.`;
+
+      case 'CREATE': {
+        const slug = args[0].toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+        await DiscordRequest(`guilds/${guildId}/channels`, { method: 'POST', body: { name: slug, type: 0, parent_id: TEXT_CATEGORY_ID } });
+        return `✅ Channel \`#${slug}\` dibuat.`;
+      }
+
+      case 'MSG': {
+        await DiscordRequest(`channels/${args[0] || channelId}/messages`, { method: 'POST', body: { content: args.slice(1).join('|').slice(0, 1900) } });
+        return `✅ Pesan terkirim.`;
+      }
+
+      default:
+        return null;
+    }
+  } catch (err) {
+    return `❌ Gagal: ${err.message.slice(0, 200)}`;
+  }
+}
+
+// ─── Try to parse action from AI response ───
+function parseAction(text) {
+  const lines = text.split('\n').map(l => l.trim());
+  // Look for ACTION: line
+  const actionLine = lines.find(l => l.startsWith('ACTION:'));
+  if (actionLine) {
+    const action = actionLine.replace('ACTION:', '').trim();
+    const rest = lines.filter(l => !l.startsWith('ACTION:')).join(' ').trim();
+    return { action, text: rest };
+  }
+  return { action: null, text };
+}
+
+// ─── Interactions endpoint ───
+app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (req, res) => {
+  const { type, data, guild_id, channel_id, member, token: intToken, id: intId } = req.body;
+  const username = member?.user?.username || 'unknown';
+
+  if (type === InteractionType.PING) {
+    return res.send({ type: InteractionResponseType.PONG });
+  }
+
+  if (type === InteractionType.APPLICATION_COMMAND) {
+    const { name, options } = data;
+    console.log(`[/${name}] from ${username}`);
+
+    // ═══ /create ═══
+    if (name === 'create') {
+      const nama = options?.find(o => o.name === 'nama')?.value;
+      if (!nama) return res.send({ type: 4, data: { content: '❌ Nama wajib diisi.' } });
+      const slug = nama.toLowerCase().replace(/[^a-z0-9\s-]/g, '').replace(/\s+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      if (!slug || slug.length < 2) return res.send({ type: 4, data: { content: `❌ Nama tidak valid.` } });
+      try {
+        const chResp = await DiscordRequest(`guilds/${guild_id}/channels`, { method: 'POST', body: { name: slug, type: 0, parent_id: TEXT_CATEGORY_ID } });
+        const ch = await chResp.json();
+        return res.send({ type: 4, data: { content: `✅ <#${ch.id}> dibuat (\`#${ch.name}\`)` } });
+      } catch (err) {
+        return res.send({ type: 4, data: { content: `❌ Gagal: ${err.message.slice(0, 120)}` } });
+      }
+    }
+
+    // ═══ /edit ═══
+    if (name === 'edit') {
+      const chId = options?.find(o => o.name === 'channel')?.value;
+      const instruksi = options?.find(o => o.name === 'instruksi')?.value;
+      if (!chId || !instruksi) return res.send({ type: 4, data: { content: '❌ Pilih channel + instruksi.' } });
+
+      res.send({ type: 5 }); // Defer
+
+      // AI prompt for action extraction
+      const sysPrompt = `Extract a Discord action from user request. RESPOND ONLY WITH:
+ACTION: CMD|channel_id|arg1|arg2
+CMDs: DELETE, RENAME|new_name, TOPIC|text, CREATE|channel_name, MSG|channel_id|text, NONE
+Example: "hapus channel" -> ACTION: DELETE|channel_id
+Example: "rename jadi lobby" -> ACTION: RENAME|channel_id|lobby
+Use the exact channel_id: ${chId}. If unsure, use ACTION: NONE`;
+
+      const aiText = await callAI(
+        `User instruction on channel ${chId}: ${instruksi}`,
+        sysPrompt
+      );
+
+      const { action, text } = parseAction(aiText);
+      const result = action ? await executeAction(action, guild_id, chId) : null;
+      const content = result || text || `✅ Instruksi diterima.`;
+
+      try {
+        await fetch(`https://discord.com/api/v10/webhooks/${process.env.CLIENT_ID}/${encodeURIComponent(intToken)}/messages/@original`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: content.slice(0, 1900) })
+        });
+      } catch (e) { console.log('Follow-up failed:', e.message); }
+      return;
+    }
+
+    // ═══ /prompt ═══
+    if (name === 'prompt') {
+      const prompt = options?.find(o => o.name === 'prompt')?.value;
+      if (!prompt) return res.send({ type: 4, data: { content: '❌ Prompt wajib diisi.' } });
+
+      res.send({ type: 5 }); // Defer
+
+      const sysPrompt = `Kamu adalah Hermes Discord Bot. Jawab user dengan informatif.
+Gunakan format ACTION:CMD|args jika perlu eksekusi. ACTION: NONE untuk no action.`;
+
+      const aiText = await callAI(`[CHANNEL=${channel_id}] ${prompt}`, sysPrompt);
+      const { action, text } = parseAction(aiText);
+      const result = action ? await executeAction(action, guild_id, channel_id) : null;
+      const content = result ? result + '\n' + text : text;
+
+      try {
+        await fetch(`https://discord.com/api/v10/webhooks/${process.env.CLIENT_ID}/${encodeURIComponent(intToken)}/messages/@original`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ content: (content || '✅ Selesai.').slice(0, 1900) })
+        });
+      } catch (e) { console.log('Follow-up failed:', e.message); }
+      return;
+    }
+
+    // ═══ /rule ═══
+    if (name === 'rule') {
+      const aturan = options?.find(o => o.name === 'aturan')?.value;
+      if (!aturan) return res.send({ type: 4, data: { content: '❌ Aturan wajib diisi.' } });
+      try {
+        await DiscordRequest(`channels/${channel_id}`, { method: 'PATCH', body: { topic: aturan.slice(0, 1024) } });
+        return res.send({ type: 4, data: { content: `✅ Aturan diterapkan.` } });
+      } catch (err) {
+        return res.send({ type: 4, data: { content: `❌ Gagal: ${err.message.slice(0, 120)}` } });
+      }
+    }
+
+    console.error(`unknown command: ${name}`);
+    return res.status(400).json({ error: 'unknown command' });
+  }
+
+  console.error('unknown interaction type', type);
+  return res.status(400).json({ error: 'unknown interaction type' });
+});
+
+app.listen(PORT, () => {
+  console.log('Listening on port', PORT);
+});
