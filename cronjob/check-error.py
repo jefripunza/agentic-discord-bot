@@ -11,13 +11,20 @@ LOG_FILE = os.path.join(HOME, ".hermes/logs/discord-bot-error.log")
 CHANNEL_ID = "1517063581835853895"  # bot-error
 
 def load_token():
-    p = os.path.join(HOME, "workspace/discord-backend.py.bak/creds.json")
-    if os.path.exists(p):
-        with open(p) as f:
-            d = json.load(f)
-        if d.get("DISCORD_BOT_TOKEN"):
-            return d["DISCORD_BOT_TOKEN"]
-    return os.environ.get("DISCORD_TOKEN", "")
+    # 1. Dari environment variable
+    if tok := os.environ.get("DISCORD_TOKEN", ""):
+        return tok
+    # 2. Dari .env file di project
+    env_path = os.path.join(HOME, "workspace/discord-bot/.env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DISCORD_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                if line.startswith("export DISCORD_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 BOT_KEY = load_token()
 if not BOT_KEY or len(BOT_KEY) < 10:
