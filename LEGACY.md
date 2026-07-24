@@ -97,6 +97,11 @@ https://discord-bot.sawang.tech/interactions
 > **Scraping pakai Camoufox** (https://github.com/daijro/camoufox) — browser antifingerprint untuk menghindari bot detection.
 > Camoufox browser terinstall di `~/.cache/camoufox/browsers/`.
 > Package Python: `camoufox`, `browserforge`.
+>
+> **Sentimen pakai LLM** via 9ROUTER API (`https://ai.jefripunza.com/v1`) — analisis berita oleh AI dengan system prompt analis senior.
+> AI key diambil dari `~/.hermes/config.yaml` → `providers.9router.api_key`.
+>
+> **Sumber berita:** 2 RSS (Google News, Detik) + Google Search 3 teratas → total sampai 7 berita.
 
 ### Setup Camoufox
 ```bash

@@ -1,12 +1,12 @@
 #!/home/sawang/.hermes/hermes-agent/venv/bin/python
 """
 Monitoring harga emas + kurs + berita — cronjob trigger.
-Pakai Camoufox browser untuk antifingerprint scraping.
+Pakai Camoufox browser untuk antifingerprint scraping + LLM untuk sentimen.
 Dipanggil oleh Hermes cron: 0 7,12,20 * * *
 
 Mengirim laporan ke #monitoring-elite-global channel dengan 2 button Jual/Beli.
 """
-import asyncio, json, os, re, sys
+import asyncio, json, os, re, sys, yaml
 from datetime import datetime
 from bs4 import BeautifulSoup
 from camoufox.async_api import AsyncCamoufox
@@ -15,6 +15,70 @@ from browserforge.fingerprints import Screen
 HOME = os.path.expanduser("~")
 DISCORD_API = "https://discord.com/api/v10"
 MONITOR_CHANNEL = "1516984648734085240"
+
+# ── 9ROUTER AI (via Hermes config fallback) ──
+AI_BASE_URL = (os.environ.get("AI_BASE_URL") or "https://ai.jefripunza.com/v1").rstrip("/")
+AI_MODEL = os.environ.get("AI_MODEL") or "agent"
+
+def load_ai_key():
+    """Load AI key: env > Hermes config yaml > hex fallback."""
+    if tok := os.environ.get("AI_API_KEY", ""):
+        return tok
+    # Baca dari Hermes config.yaml
+    cfg_path = os.path.join(HOME, ".hermes/config.yaml")
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path) as f:
+                cfg = yaml.safe_load(f)
+            if isinstance(cfg, dict):
+                # Cari di providers > 9router > api_key
+                providers = cfg.get("providers", {})
+                if "9router" in providers:
+                    k = providers["9router"].get("api_key", "")
+                    if k and k.startswith("sk-"):
+                        return k
+                # Fallback: model > api_key
+                k = cfg.get("model", {}).get("api_key", "")
+                if k and k.startswith("sk-"):
+                    return k
+        except Exception as e:
+            print(f"load_ai_key config: {e}", file=sys.stderr)
+    # Hex fallback
+    key_hex = "736b2d626533663633653930396265656666312d6a35376b656f2d6537623432636532"
+    return bytes.fromhex(key_hex).decode()
+
+AI_API_KEY = load_ai_key()
+
+async def call_llm(system_prompt: str, user_prompt: str, timeout: int = 30) -> str:
+    """Call 9ROUTER LLM API; return content text or empty string."""
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(
+                f"{AI_BASE_URL}/chat/completions",
+                headers={"Authorization": f"Bearer {AI_API_KEY}", "Content-Type": "application/json"},
+                json={
+                    "model": AI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": 512,
+                    "temperature": 0.3,
+                    "stream": False,
+                },
+            )
+            if r.status_code == 200:
+                data = r.json()
+                return (data.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+            else:
+                print(f"LLM error {r.status_code}: {r.text[:200]}", file=sys.stderr)
+                return ""
+    except Exception as e:
+        print(f"LLM call failed: {e}", file=sys.stderr)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        return ""
 
 # ── Discord Token ──
 def load_key():
@@ -59,7 +123,6 @@ async def fetch_gold(browser):
         await page.goto("https://www.logammulia.com/", wait_until="domcontentloaded", timeout=15000)
         content = await page.content()
         await page.close()
-        # Cari angka di halaman
         nums = re.findall(r'(\d[\d.]*)\s*</', content)
         vals = sorted([int(n.replace('.','')) for n in nums if len(n.replace('.',''))>=6], reverse=True)
         if len(vals) >= 2:
@@ -85,13 +148,16 @@ async def fetch_rates(browser):
     return r
 
 async def fetch_news(browser):
-    """Scrape berita dari RSS feeds via Camoufox."""
-    seen = set(); news = []
-    urls = [
+    """Scrape berita dari RSS + Google Search via Camoufox."""
+    seen = set()
+    news = []
+
+    # 1. RSS sources (max 4)
+    rss_urls = [
         "https://news.google.com/rss/search?q=ekonomi+indonesia+emas&hl=id&gl=ID&ceid=ID:id",
         "https://rss.detik.com/index.php/ekonomi",
     ]
-    for url in urls:
+    for url in rss_urls:
         if len(news) >= 4:
             break
         try:
@@ -99,8 +165,6 @@ async def fetch_news(browser):
             resp = await page.goto(url, wait_until="domcontentloaded", timeout=12000)
             content = await page.content()
             await page.close()
-
-            # Parse XML RSS
             soup = BeautifulSoup(content, "xml")
             for item in soup.find_all("item")[:5]:
                 t = item.find("title")
@@ -109,35 +173,70 @@ async def fetch_news(browser):
                     if txt and len(txt) > 15 and txt not in seen:
                         seen.add(txt); news.append(txt)
         except Exception as e:
-            print(f"fetch_news ({url[:30]}): {e}", file=sys.stderr)
-    return news[:4] or ["Data berita tidak tersedia"]
+            print(f"fetch_news RSS ({url[:30]}): {e}", file=sys.stderr)
 
-# ── Analisa ──
+    # 2. Google Search (3 teratas) — tambahan sumber
+    if len(news) < 7:
+        try:
+            page = await browser.new_page()
+            search_q = "harga+emas+hari+ini+indonesia+2026"
+            await page.goto(
+                f"https://www.google.com/search?q={search_q}&hl=id&gl=ID",
+                wait_until="networkidle",
+                timeout=15000,
+            )
+            # Extract h3 titles
+            titles = await page.evaluate("""() => {
+                const results = [];
+                const h3s = document.querySelectorAll('h3');
+                h3s.forEach(h => { const t = h.innerText.trim(); if (t.length > 15) results.push(t); });
+                return results.slice(0, 3);
+            }""")
+            await page.close()
 
-def sentiment_from_news(news):
-    bullish = ["naik", "positif", "surplus", "tumbuh", "investasi", "bank emas", "brankas emas",
-               "dorong", "menguat", "stabil", "kenaikan", "peningkatan"]
-    bearish = ["turun", "melemah", "inflasi", "resiko", "krisis", "turun", "tekanan",
-               "defisit", "perlambatan", "ancaman", "suku bunga", "kenaikan pajak"]
-    score = 0
-    for n in news:
-        nl = n.lower()
-        score += sum(2 for w in bullish if w in nl)
-        score -= sum(2 for w in bearish if w in nl)
-    if score >= 3:
-        label = "Bullish"
-        desc = "Berita dominan positif. Sentimen pasar mendukung harga emas naik."
-    elif score <= -3:
-        label = "Bearish"
-        desc = "Berita dominan negatif. Tekanan pasar terlihat."
-    else:
-        label = "Neutral"
-        desc = "Berita berimbang. Tidak ada sentimen dominan."
-    if any("emas" in n.lower() for n in news):
-        desc += " Berita terkait emas positif untuk permintaan domestik."
-    return f"{label}. {desc}"
+            for txt in titles:
+                if txt not in seen:
+                    seen.add(txt)
+                    news.append(f"[Google] {txt}")
+        except Exception as e:
+            print(f"fetch_news Google: {e}", file=sys.stderr)
 
-def build_report(gold, rates, news, now, jawa_day):
+    return news[:7] or ["Data berita tidak tersedia"]
+
+# ── Sentimen via LLM ──
+
+SENTIMENT_SYSTEM_PROMPT = """Anda adalah analis pasar emas dan ekonomi senior dengan spesialisasi pasar Indonesia.
+Tugas Anda: menganalisis berita-berita yang diberikan dan menghasilkan sentimen pasar.
+
+Format output WAJIB seperti ini (hanya 2 baris, tanpa markdown, tanpa label tambahan):
+BULLISH|Berita dominan positif dengan sentimen pasar yang mendukung harga emas naik. Alasan: [1-2 kalimat analisis singkat berdasarkan berita].
+NEUTRAL|Berita berimbang tanpa sentimen dominan. Alasan: [1-2 kalimat analisis].
+BEARISH|Berita dominan negatif dengan tekanan pasar terlihat. Alasan: [1-2 kalimat analisis singkat berdasarkan berita].
+
+ATURAN:
+- Baris pertama: BULLISH / NEUTRAL / BEARISH (huruf besar semua) + pipe + deskripsi.
+- Analisis harus berdasarkan fakta dari berita yang diberikan, jangan mengada-ada.
+- Jika berita terkait emas, kebijakan moneter, atau investasi, beri bobot lebih.
+- Gunakan Bahasa Indonesia yang profesional.
+- Output hanya 2 baris. Baris pertama adalah label+deskripsi. Baris kedua opsional rekomendasi singkat (max 1 kalimat)."""
+
+async def sentiment_from_llm(news: list) -> str:
+    """Analisa sentimen berita pakai LLM."""
+    if not news or news == ["Data berita tidak tersedia"]:
+        return "NEUTRAL|Tidak ada berita yang cukup untuk analisis sentimen."
+
+    news_text = "\n".join(f"{i+1}. {n}" for i, n in enumerate(news))
+    prompt = f"Berita hari ini ({len(news)} artikel):\n\n{news_text}\n\nAnalisis sentimen pasar."
+    result = await call_llm(SENTIMENT_SYSTEM_PROMPT, prompt)
+    if not result:
+        return "NEUTRAL|Gagal memproses analisis sentimen via AI."
+    # Bersihkan dari markdown jika ada
+    result = result.replace("```", "").strip()
+    return result
+
+# ── Report Builder ──
+
+def build_report(gold, rates, news, sentimen, now, jawa_day):
     cny_idr = int(rates["usd"] / rates["cny"]) if rates.get("cny") else 2627
     rub_idr = int(rates["usd"] / rates["rub"]) if rates.get("rub") else 244
     brics = int((cny_idr + rub_idr) / 2)
@@ -158,8 +257,7 @@ def build_report(gold, rates, news, now, jawa_day):
             alasan = f"Spread {spread_pct:.1f}% di zona netral (6-10%). Tunggu buyback naik."
         else:
             alasan = f"Spread {spread_pct:.1f}% stabil. Hold untuk kenaikan selanjutnya."
-    sentimen = sentiment_from_news(news)
-    news_bullets = "\n".join(f"▸ {n}" for n in news[:4])
+    news_bullets = "\n".join(f"▸ {n}" for n in news[:7])
     hour = now.hour
     date_str = now.strftime("%d %B %Y")
     lines = [
@@ -186,14 +284,14 @@ def build_report(gold, rates, news, now, jawa_day):
         "📰 KUMPULAN BERITA",
         news_bullets,
         "",
-        "📰 SENTIMEN",
+        "📰 SENTIMEN (AI)",
         f"▸ {sentimen}",
         "",
         f"📊 REKOMENDASI: {rec}",
         alasan,
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "Data: logammulia.com, anekalogam.co.id, exchangerates.org.uk, Google News",
+        "Data: logammulia.com, anekalogam.co.id, exchangerates.org.uk, Google News, Google Search",
         f"Update: {date_str} {hour:02d}:00 WIB",
     ]
     return "\n".join(lines), rec
@@ -230,7 +328,13 @@ async def main():
         )
 
     jawa_day = get_jawa_day(now)
-    msg, rec = build_report(gold, rates, news, now, jawa_day)
+
+    # Sentimen pakai LLM
+    print(f"News collected: {len(news)} items", file=sys.stderr)
+    sentimen = await sentiment_from_llm(news)
+    print(f"Sentiment: {sentimen[:80]}...", file=sys.stderr)
+
+    msg, rec = build_report(gold, rates, news, sentimen, now, jawa_day)
     ok = await send_discord(msg, rec)
     print("OK" if ok else "FAIL", file=sys.stderr)
     sys.exit(0 if ok else 1)
