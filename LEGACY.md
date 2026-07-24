@@ -98,8 +98,9 @@ https://discord-bot.sawang.tech/interactions
 > Camoufox browser terinstall di `~/.cache/camoufox/browsers/`.
 > Package Python: `camoufox`, `browserforge`.
 >
-> **Sentimen pakai LLM** via 9ROUTER API (`https://ai.jefripunza.com/v1`) — analisis berita oleh AI dengan system prompt analis senior.
-> AI key diambil dari `~/.hermes/config.yaml` → `providers.9router.api_key`.
+> **Sentimen & Rekomendasi pakai LLM** via 9ROUTER API — analisis berita oleh AI dengan system prompt analis senior.
+> AI key diambil dari `~/credentials/env_9router` atau `~/credentials/hermes_9router.txt`.
+> Rekomendasi JUAL/BELI/TAHAN juga pakai AI berdasarkan data harga, spread, kurs, dan sentimen.
 >
 > **Sumber berita:** 2 RSS (Google News, Detik) + Google Search 3 teratas → total sampai 7 berita.
 
