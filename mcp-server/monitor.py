@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Monitoring harga — pure data + template, no AI dependency, 0 token cost."""
+"""
+Monitoring harga emas + kurs + berita — cronjob trigger.
+Dipanggil oleh crontab: 0 7,12,20 * * *
+JANGAN panggil langsung — via cron.
+
+Mengirim laporan ke #monitoring-elite-global channel dengan 2 button Jual/Beli.
+"""
 import asyncio, json, os, re, sys
 from datetime import datetime
 import httpx
@@ -11,13 +17,20 @@ DISCORD_API = "https://discord.com/api/v10"
 MONITOR_CHANNEL = "1516984648734085240"
 
 def load_key():
-    p = os.path.join(HOME, "workspace/discord-backend.py.bak/creds.json")
-    if os.path.exists(p):
-        with open(p) as f:
-            d = json.load(f)
-        if d.get("DISCORD_BOT_TOKEN"):
-            return d["DISCORD_BOT_TOKEN"]
-    return os.environ.get("DISCORD_TOKEN", "")
+    # 1. Environment variable (via systemd atau .env sourcing)
+    if tok := os.environ.get("DISCORD_TOKEN", ""):
+        return tok
+    # 2. .env file di project
+    env_path = os.path.join(HOME, "workspace/discord-bot/.env")
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("DISCORD_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+                if line.startswith("export DISCORD_TOKEN="):
+                    return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
 BOT_KEY = load_key()
 if not BOT_KEY or len(BOT_KEY) < 10:
@@ -33,7 +46,7 @@ INDODAYS = {"Monday":"Senin","Tuesday":"Selasa","Wednesday":"Rabu","Thursday":"K
 def get_jawa_day(dt):
     base = datetime(2025, 1, 1)
     diff = (dt - base).days
-    pasaran_idx = (4 + diff) % 5  # approximate
+    pasaran_idx = (4 + diff) % 5
     en = dt.strftime("%A")
     return f"{INDODAYS.get(en, en)} {JAVA_PASARAN[pasaran_idx]}"
 
@@ -86,7 +99,6 @@ async def fetch_news():
     return news[:4] or ["Data berita tidak tersedia"]
 
 def sentiment_from_news(news):
-    """Simple keyword-based sentiment analysis."""
     bullish = ["naik", "positif", "surplus", "tumbuh", "investasi", "bank emas", "brankas emas",
                "dorong", "menguat", "stabil", "kenaikan", "peningkatan"]
     bearish = ["turun", "melemah", "inflasi", "resiko", "krisis", "turun", "tekanan",
@@ -96,8 +108,6 @@ def sentiment_from_news(news):
         nl = n.lower()
         score += sum(2 for w in bullish if w in nl)
         score -= sum(2 for w in bearish if w in nl)
-    
-    # Additional context from gold data
     if score >= 3:
         label = "Bullish"
         desc = "Berita dominan positif. Sentimen pasar mendukung harga emas naik."
@@ -107,11 +117,8 @@ def sentiment_from_news(news):
     else:
         label = "Neutral"
         desc = "Berita berimbang. Tidak ada sentimen dominan."
-    
-    # Add specific news-based context
     if any("emas" in n.lower() for n in news):
         desc += " Berita terkait emas positif untuk permintaan domestik."
-    
     return f"{label}. {desc}"
 
 def build_report(gold, rates, news, now, jawa_day):
@@ -120,15 +127,11 @@ def build_report(gold, rates, news, now, jawa_day):
     brics = int((cny_idr + rub_idr) / 2)
     spread_val = gold["jual"] - gold["beli"]
     spread_pct = spread_val / gold["beli"] * 100
-    
-    # Approximate daily changes (based on typical Jakarta data)
     usd_ref = 17780
     usd_chg = (rates["usd"] - usd_ref) / usd_ref * 100
     usd_sign = "▲" if usd_chg > 0 else "▼" if usd_chg < 0 else "→"
-    emas_chg = -0.5  # simplified: typical daily change for buyback
+    emas_chg = -0.5
     emas_sign = "▼" if emas_chg < 0 else "▲" if emas_chg > 0 else "→"
-    
-    # Recommendation
     if spread_pct > 10:
         rec = "JUAL"; alasan = f"Spread {spread_pct:.1f}% di atas 10%. Lebih baik jual sekarang."
     elif spread_pct < 6:
@@ -139,12 +142,10 @@ def build_report(gold, rates, news, now, jawa_day):
             alasan = f"Spread {spread_pct:.1f}% di zona netral (6-10%). Tunggu buyback naik."
         else:
             alasan = f"Spread {spread_pct:.1f}% stabil. Hold untuk kenaikan selanjutnya."
-    
     sentimen = sentiment_from_news(news)
     news_bullets = "\n".join(f"▸ {n}" for n in news[:4])
     hour = now.hour
     date_str = now.strftime("%d %B %Y")
-    
     lines = [
         "📊 LAPORAN MONITORING",
         f"🗓️ {jawa_day}, {date_str} — ⏰ {hour:02d}:00 WIB",

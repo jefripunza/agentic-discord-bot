@@ -16,7 +16,8 @@ let mcpClient = null;
 async function connectMCP() {
   const transport = new StdioClientTransport({
     command: process.env.HOME + '/.hermes/hermes-agent/venv/bin/python',
-    args: [process.env.HOME + '/workspace/discord-mcp-server/discord_mcp.py']
+    args: [process.env.HOME + '/workspace/discord-bot/mcp-server/discord_mcp.py'],
+    env: { ...process.env, DISCORD_TOKEN: process.env.DISCORD_TOKEN }
   });
   mcpClient = new Client({ name: 'discord-bot-backend', version: '1.0.0' });
   await mcpClient.connect(transport);

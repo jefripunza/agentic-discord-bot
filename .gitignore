@@ -6,3 +6,4 @@ creds.json
 bot-token.txt
 run.sh
 update_token.py
+.env
