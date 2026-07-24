@@ -94,6 +94,22 @@ https://discord-bot.sawang.tech/interactions
 /home/sawang/workspace/discord-bot/cronjob/monitor.py
 ```
 
+> **Scraping pakai Camoufox** (https://github.com/daijro/camoufox) — browser antifingerprint untuk menghindari bot detection.
+> Camoufox browser terinstall di `~/.cache/camoufox/browsers/`.
+> Package Python: `camoufox`, `browserforge`.
+
+### Setup Camoufox
+```bash
+# Install package
+pip install camoufox
+
+# Download browser (~663MB)
+camoufox fetch
+
+# Test running
+cd /home/sawang/workspace/discord-bot && /home/sawang/.hermes/hermes-agent/venv/bin/python cronjob/monitor.py
+```
+
 ### Crontab (Hermes Cron — WAJIB)
 
 ```bash
@@ -200,6 +216,13 @@ Hanya bisa di **#🗣️┃command** (channel_id: 1516965584296874156).
 5. Cronjob didaftarkan via **`hermes cron create`** (jangan pakai system crontab)
 6. Script di-*copy* ke `~/.hermes/scripts/` dan didaftarkan dengan `--no-agent` jika mandiri
 7. Jika ada perubahan di repo, copy ulang: `cp repo/cronjob/*.py ~/.hermes/scripts/`
+
+### Workflow Update Script (WAJIB — urut)
+1. **Edit** → file di `cronjob/` dalam git repo (`~/workspace/discord-bot/cronjob/`)
+2. **Test** → `cd repo && python cronjob/script.py` — jika error balik ke step 1
+3. **Copy** → `cp repo/cronjob/script.py ~/.hermes/scripts/`
+4. **Update wasiat** → edit `LEGACY.md` jika perlu
+5. **Push** → `git add -A && git commit && git push` ke GitHub
 
 ---
 

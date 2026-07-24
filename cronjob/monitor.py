@@ -1,26 +1,25 @@
-#!/usr/bin/env python3
+#!/home/sawang/.hermes/hermes-agent/venv/bin/python
 """
 Monitoring harga emas + kurs + berita — cronjob trigger.
-Dipanggil oleh crontab: 0 7,12,20 * * *
-JANGAN panggil langsung — via cron.
+Pakai Camoufox browser untuk antifingerprint scraping.
+Dipanggil oleh Hermes cron: 0 7,12,20 * * *
 
 Mengirim laporan ke #monitoring-elite-global channel dengan 2 button Jual/Beli.
 """
 import asyncio, json, os, re, sys
 from datetime import datetime
-import httpx
 from bs4 import BeautifulSoup
+from camoufox.async_api import AsyncCamoufox
+from browserforge.fingerprints import Screen
 
 HOME = os.path.expanduser("~")
-HTTP_HDR = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120"}
 DISCORD_API = "https://discord.com/api/v10"
 MONITOR_CHANNEL = "1516984648734085240"
 
+# ── Discord Token ──
 def load_key():
-    # 1. Environment variable (via systemd atau .env sourcing)
     if tok := os.environ.get("DISCORD_TOKEN", ""):
         return tok
-    # 2. .env file di project
     env_path = os.path.join(HOME, "workspace/discord-bot/.env")
     if os.path.exists(env_path):
         with open(env_path) as f:
@@ -50,53 +49,70 @@ def get_jawa_day(dt):
     en = dt.strftime("%A")
     return f"{INDODAYS.get(en, en)} {JAVA_PASARAN[pasaran_idx]}"
 
-async def fetch_gold():
+# ── Scraping via Camoufox ──
+
+async def fetch_gold(browser):
+    """Scrape harga emas dari logammulia.com via Camoufox."""
     r = {"beli": 2475000, "jual": 2703000}
-    async with httpx.AsyncClient(timeout=10, headers=HTTP_HDR) as c:
-        try:
-            resp = await c.get("https://www.logammulia.com/")
-            if resp.status_code == 200:
-                nums = re.findall(r'(\d[\d.]*)\s*</', resp.text)
-                vals = sorted([int(n.replace('.','')) for n in nums if len(n.replace('.',''))>=6], reverse=True)
-                if len(vals) >= 2:
-                    r["jual"], r["beli"] = vals[0], vals[1]
-        except: pass
+    try:
+        page = await browser.new_page()
+        await page.goto("https://www.logammulia.com/", wait_until="domcontentloaded", timeout=15000)
+        content = await page.content()
+        await page.close()
+        # Cari angka di halaman
+        nums = re.findall(r'(\d[\d.]*)\s*</', content)
+        vals = sorted([int(n.replace('.','')) for n in nums if len(n.replace('.',''))>=6], reverse=True)
+        if len(vals) >= 2:
+            r["jual"], r["beli"] = vals[0], vals[1]
+    except Exception as e:
+        print(f"fetch_gold error: {e}", file=sys.stderr)
     return r
 
-async def fetch_rates():
+async def fetch_rates(browser):
+    """Scrape kurs dari open.er-api.com via Camoufox."""
     r = {"usd": 17797, "cny": 6.77, "rub": 72.94}
-    async with httpx.AsyncClient(timeout=10) as c:
-        try:
-            resp = await c.get("https://open.er-api.com/v6/latest/USD")
-            if resp.status_code == 200:
-                d = resp.json().get("rates", {})
-                r["usd"] = int(d.get("IDR", 17797))
-                r["cny"] = d.get("CNY", 6.77)
-                r["rub"] = d.get("RUB", 72.94)
-        except: pass
+    try:
+        page = await browser.new_page()
+        await page.goto("https://open.er-api.com/v6/latest/USD", wait_until="domcontentloaded", timeout=15000)
+        text = await page.evaluate("document.body.innerText")
+        await page.close()
+        d = json.loads(text).get("rates", {})
+        r["usd"] = int(d.get("IDR", 17797))
+        r["cny"] = d.get("CNY", 6.77)
+        r["rub"] = d.get("RUB", 72.94)
+    except Exception as e:
+        print(f"fetch_rates error: {e}", file=sys.stderr)
     return r
 
-async def fetch_news():
+async def fetch_news(browser):
+    """Scrape berita dari RSS feeds via Camoufox."""
     seen = set(); news = []
     urls = [
-        ("https://news.google.com/rss/search?q=ekonomi+indonesia+emas&hl=id&gl=ID&ceid=ID:id", "item"),
-        ("https://rss.detik.com/index.php/ekonomi", "item"),
+        "https://news.google.com/rss/search?q=ekonomi+indonesia+emas&hl=id&gl=ID&ceid=ID:id",
+        "https://rss.detik.com/index.php/ekonomi",
     ]
-    async with httpx.AsyncClient(timeout=12, headers=HTTP_HDR) as c:
-        for url, tag in urls:
-            if len(news) >= 4: break
-            try:
-                resp = await c.get(url, timeout=8)
-                if resp.status_code == 200 and "xml" in resp.headers.get("content-type", ""):
-                    soup = BeautifulSoup(resp.text, "xml")
-                    for item in soup.find_all(tag)[:5]:
-                        t = item.find("title")
-                        if t:
-                            txt = t.get_text(strip=True).split(" - ")[0].split(" — ")[0].strip()
-                            if txt and len(txt) > 15 and txt not in seen:
-                                seen.add(txt); news.append(txt)
-            except: pass
+    for url in urls:
+        if len(news) >= 4:
+            break
+        try:
+            page = await browser.new_page()
+            resp = await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+            content = await page.content()
+            await page.close()
+
+            # Parse XML RSS
+            soup = BeautifulSoup(content, "xml")
+            for item in soup.find_all("item")[:5]:
+                t = item.find("title")
+                if t:
+                    txt = t.get_text(strip=True).split(" - ")[0].split(" — ")[0].strip()
+                    if txt and len(txt) > 15 and txt not in seen:
+                        seen.add(txt); news.append(txt)
+        except Exception as e:
+            print(f"fetch_news ({url[:30]}): {e}", file=sys.stderr)
     return news[:4] or ["Data berita tidak tersedia"]
+
+# ── Analisa ──
 
 def sentiment_from_news(news):
     bullish = ["naik", "positif", "surplus", "tumbuh", "investasi", "bank emas", "brankas emas",
@@ -194,6 +210,7 @@ async def send_discord(msg, rec):
         {"type": 2, "label": "📈 Jual", "style": styles["jual"], "custom_id": "jual_emas"},
         {"type": 2, "label": "📉 Beli", "style": styles["beli"], "custom_id": "beli_emas"}
     ]}]
+    import httpx
     async with httpx.AsyncClient(timeout=15) as c:
         r = await c.post(f"{DISCORD_API}/channels/{MONITOR_CHANNEL}/messages", headers=DISC_HDR, json=payload)
     return r.status_code == 200
@@ -201,7 +218,17 @@ async def send_discord(msg, rec):
 async def main():
     now = datetime.now()
     print(f"Run {now.isoformat()}", file=sys.stderr)
-    gold, rates, news = await asyncio.gather(fetch_gold(), fetch_rates(), fetch_news())
+
+    async with AsyncCamoufox(
+        headless=True,
+        screen=Screen(min_width=1280, max_width=1280, min_height=720, max_height=720),
+    ) as browser:
+        gold, rates, news = await asyncio.gather(
+            fetch_gold(browser),
+            fetch_rates(browser),
+            fetch_news(browser),
+        )
+
     jawa_day = get_jawa_day(now)
     msg, rec = build_report(gold, rates, news, now, jawa_day)
     ok = await send_discord(msg, rec)
