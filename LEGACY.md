@@ -27,8 +27,10 @@
 │  │ (interaksi) █│   │ .py (Discord REST API)   │   │
 │  │ AI via       │   └──────────────────────────┘   │
 │  │ 9ROUTER API  │   ┌──────────────────────────┐   │
-│  └──────────────┘   │ monitor.py (cronjob)     │   │
-│                      │ check-error.py (cron)   │   │
+│  └──────────────┘   │ cronjob/                  │   │
+│                      │ ├── monitor.py (cron)    │   │
+│                      │ ├── check-error.py (cron)│   │
+│                      │ └── ...                  │   │
 │                      └──────────────────────────┘   │
 │  Channel: #monitoring-elite-global                  │
 │           #ai-response, #bot-error, #command        │
@@ -89,12 +91,12 @@ https://discord-bot.sawang.tech/interactions
 
 ### Script
 ```
-/home/sawang/workspace/discord-bot/mcp-server/monitor.py
+/home/sawang/workspace/discord-bot/cronjob/monitor.py
 ```
 
 ### Crontab
 ```cron
-0 7,12,20 * * * cd /home/sawang/workspace/discord-bot && /home/sawang/.hermes/hermes-agent/venv/bin/python mcp-server/monitor.py >> /home/sawang/.hermes/logs/monitor-cron.log 2>&1
+0 7,12,20 * * * cd /home/sawang/workspace/discord-bot && /home/sawang/.hermes/hermes-agent/venv/bin/python cronjob/monitor.py >> /home/sawang/.hermes/logs/monitor-cron.log 2>&1
 ```
 
 ### Isi Laporan
@@ -121,7 +123,7 @@ Kalau user klik Jual/Beli:
 
 ### Script
 ```
-/home/sawang/workspace/discord-bot/mcp-server/check-error.py
+/home/sawang/workspace/discord-bot/cronjob/check-error.py
 ```
 
 ### Fungsi
@@ -184,7 +186,7 @@ Hanya bisa di **#🗣️┃command** (channel_id: 1516965584296874156).
 1. Setiap cronjob **WAJIB** implementasi di **Python script**
 2. Tugas cronjob hanya **trigger Python script** (jangan logic di shell/cron)
 3. Python script boleh akses **LLM/AI** untuk analisa
-4. Script Python disimpan di folder proyek git masing-masing
+4. Script Python disimpan di folder **`cronjob/`** masing-masing proyek git
 5. Cronjob terdaftar di crontab Bapak (bukan root)
 
 ---
@@ -199,13 +201,13 @@ Hanya bisa di **#🗣️┃command** (channel_id: 1516965584296874156).
 ### MCP Connection failed
 Pastikan:
 - Path Python: `~/.hermes/hermes-agent/venv/bin/python`
-- Path MCP: `~/workspace/discord-bot/mcp-server/discord_mcp.py`
+- Path MCP: `~/workspace/discord-bot/mcp-server/discord_mcp.py` (tetap di `mcp-server/`, jangan dipindah)
 - DISCORD_TOKEN ter-pass ke env MCP (fix di app.js line 19: `env: { ...process.env, DISCORD_TOKEN: process.env.DISCORD_TOKEN }`)
 
 ### Cronjob tidak jalan
 1. Cek `crontab -l` — apakah terdaftar?
 2. Cek `~/.hermes/logs/monitor-cron.log`
-3. Test manual: `cd ~/workspace/discord-bot && ~/.hermes/hermes-agent/venv/bin/python mcp-server/monitor.py`
+3. Test manual: `cd ~/workspace/discord-bot && ~/.hermes/hermes-agent/venv/bin/python cronjob/monitor.py`
 
 ---
 
@@ -229,6 +231,8 @@ git push
 ## 🔮 Masa Depan
 
 - Semua script bot Discord disimpan di repo ini
+- **Cronjob Python script** → folder `cronjob/`
+- **MCP server Discord tools** → folder `mcp-server/` (jangan dipindah)
 - Dokumen ini adalah **WASIAT** — baca dulu sebelum modifikasi besar
 - Kalau ragu, tanya Pak Jefri
 - Simpan pengetahuan baru ke **Hindsight** (bank: hermes-memories)
