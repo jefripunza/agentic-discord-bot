@@ -94,10 +94,20 @@ https://discord-bot.sawang.tech/interactions
 /home/sawang/workspace/discord-bot/cronjob/monitor.py
 ```
 
-### Crontab
-```cron
-0 7,12,20 * * * cd /home/sawang/workspace/discord-bot && /home/sawang/.hermes/hermes-agent/venv/bin/python cronjob/monitor.py >> /home/sawang/.hermes/logs/monitor-cron.log 2>&1
+### Crontab (Hermes Cron — WAJIB)
+
+```bash
+hermes cron create "0 7,12,20 * * *" \
+  --name "discord-monitor-emas" \
+  --script discord-monitor.py \
+  --no-agent \
+  --deliver local \
+  --workdir /home/sawang/workspace/discord-bot
 ```
+
+> Script disalin ke `~/.hermes/scripts/discord-monitor.py`. Setiap perubahan ke `cronjob/monitor.py` di repo, copy ulang ke sini.
+> Gunakan `--no-agent` karena script ini sudah mandiri (kirim langsung ke Discord via API).
+> Jangan gunakan system crontab — semua cronjob harus via `hermes cron create`.
 
 ### Isi Laporan
 - 📊 **LAPORAN MONITORING** — judul
@@ -187,7 +197,9 @@ Hanya bisa di **#🗣️┃command** (channel_id: 1516965584296874156).
 2. Tugas cronjob hanya **trigger Python script** (jangan logic di shell/cron)
 3. Python script boleh akses **LLM/AI** untuk analisa
 4. Script Python disimpan di folder **`cronjob/`** masing-masing proyek git
-5. Cronjob terdaftar di crontab Bapak (bukan root)
+5. Cronjob didaftarkan via **`hermes cron create`** (jangan pakai system crontab)
+6. Script di-*copy* ke `~/.hermes/scripts/` dan didaftarkan dengan `--no-agent` jika mandiri
+7. Jika ada perubahan di repo, copy ulang: `cp repo/cronjob/*.py ~/.hermes/scripts/`
 
 ---
 
@@ -204,10 +216,11 @@ Pastikan:
 - Path MCP: `~/workspace/discord-bot/mcp-server/discord_mcp.py` (tetap di `mcp-server/`, jangan dipindah)
 - DISCORD_TOKEN ter-pass ke env MCP (fix di app.js line 19: `env: { ...process.env, DISCORD_TOKEN: process.env.DISCORD_TOKEN }`)
 
-### Cronjob tidak jalan
-1. Cek `crontab -l` — apakah terdaftar?
-2. Cek `~/.hermes/logs/monitor-cron.log`
-3. Test manual: `cd ~/workspace/discord-bot && ~/.hermes/hermes-agent/venv/bin/python cronjob/monitor.py`
+### Cronjob tidak jalan (Hermes Cron)
+1. Cek `hermes cron list` — apakah terdaftar?
+2. Cek log: `~/.hermes/logs/monitor-cron.log`
+3. Test manual: `cd ~/workspace/discord-bot && ~/.hermes/hermes-agent/venv/bin/python ~/.hermes/scripts/discord-monitor.py`
+4. Update script: `cp ~/workspace/discord-bot/cronjob/monitor.py ~/.hermes/scripts/discord-monitor.py`
 
 ---
 
